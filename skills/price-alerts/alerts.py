@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Price Alerts: rings once when a price level, a % move or the opening bell hits.
+"""Price Alerts: rings once when a price level, a % move or a session open hits.
 
-    python3 alerts.py add AAPL above 200 --note "breakout"
-    python3 alerts.py add AAPL below 180            # e.g. a mental stop
-    python3 alerts.py add TSLA cross 250            # either direction
-    python3 alerts.py add NVDA pct 5                # +/-5% from the previous close
-    python3 alerts.py add SPY bell                  # NYSE opening bell, once a day
+    python3 alerts.py add EURUSD above 1.0900 --note "breakout"
+    python3 alerts.py add EURUSD below 1.0800            # e.g. a mental stop
+    python3 alerts.py add GBPJPY cross 193.00            # either direction
+    python3 alerts.py add XAUUSD pct 1                   # +/-1% from the previous daily close
+    python3 alerts.py add EURUSD session london          # London open (tokyo, sydney, newyork, overlap)
     python3 alerts.py list | remove ID | rearm ID | clear
-    python3 alerts.py check                         # fetch prices once, ring what hit
-    python3 alerts.py watch --every 60              # keep checking until the close
-    python3 alerts.py clock                         # NYSE open or closed
+    python3 alerts.py check                              # fetch prices once, ring what hit
+    python3 alerts.py watch --every 60                   # keep checking while forex is open
+    python3 alerts.py clock                              # forex open/closed, sessions
 
 Alerts live in trader/alerts.json; the latest prices in trader/prices.json.
 Each alert rings once and is then marked fired (use --repeat to re-arm automatically).
@@ -23,7 +23,9 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.join(_HERE, "_lib"), os.path.join(_HERE, "..", "_lib")]
 import tadawal as T  # noqa: E402
 
-KINDS = ("above", "below", "cross", "pct", "bell")
+KINDS = ("above", "below", "cross", "pct", "session")
+SESSION_NAMES = {"london": "London", "newyork": "New York", "new-york": "New York", "ny": "New York",
+                 "tokyo": "Tokyo", "sydney": "Sydney", "overlap": "overlap"}
 
 
 def load():
@@ -41,11 +43,16 @@ def evaluate(alerts, prices, clock, today):
         if al.get("fired") and not al.get("repeat"):
             continue
         sym = al["symbol"]
-        if al["kind"] == "bell":
-            if clock["open"] and al.get("last_day") != today:
+        if al["kind"] == "session":
+            ses = clock.get("sessions", [])
+            want = al.get("session")
+            on = ("London" in ses and "New York" in ses) if want == "overlap" else want in ses
+            if clock["open"] and on and al.get("last_day") != today:
                 al["last_day"] = today
                 al["fired"] = clock["now_ny"]
-                rings.append({"id": al["id"], "symbol": sym, "msg": "opening bell: NYSE is open (%s)" % clock["now_ny"]})
+                rings.append({"id": al["id"], "symbol": sym, "msg": "%s session is open (%s your time)%s" % (
+                    "London/New York overlap" if want == "overlap" else want, clock.get("now_local", ""),
+                    " | " + al["note"] if al.get("note") else "")})
             continue
         q = prices.get(sym)
         if not q:
@@ -56,21 +63,22 @@ def evaluate(alerts, prices, clock, today):
                 al["armed"] = True  # price went back across the level: ring again next time
             continue
         hit, msg = False, ""
+        F = lambda x: T.px(x, sym)  # noqa: E731
         if al["kind"] == "above" and px >= al["level"]:
-            hit, msg = True, "%s at %.2f is above %.2f" % (sym, px, al["level"])
+            hit, msg = True, "%s at %s is above %s" % (sym, F(px), F(al["level"]))
         elif al["kind"] == "below" and px <= al["level"]:
-            hit, msg = True, "%s at %.2f is below %.2f" % (sym, px, al["level"])
+            hit, msg = True, "%s at %s is below %s" % (sym, F(px), F(al["level"]))
         elif al["kind"] == "cross":
             last = al.get("last_price")
             if last is not None and (last - al["level"]) * (px - al["level"]) <= 0 and last != px:
-                hit, msg = True, "%s crossed %.2f (%.2f -> %.2f)" % (sym, al["level"], last, px)
+                hit, msg = True, "%s crossed %s (%s -> %s)" % (sym, F(al["level"]), F(last), F(px))
             al["last_price"] = px
         elif al["kind"] == "pct" and q.get("prev_close"):
             ch = (px / float(q["prev_close"]) - 1) * 100
             if abs(ch) >= al["level"] and al.get("last_day") != today:
                 al["last_day"] = today
-                hit, msg = True, "%s moved %+.2f%% from the previous close (%.2f -> %.2f)" % (
-                    sym, ch, float(q["prev_close"]), px)
+                hit, msg = True, "%s moved %+.2f%% (%+.0f pips) from the previous close (%s -> %s)" % (
+                    sym, ch, T.pips(px - float(q["prev_close"]), sym), F(float(q["prev_close"])), F(px))
         if hit:
             al["fired"] = clock["now_ny"]
             al["fired_price"] = px
@@ -82,8 +90,8 @@ def evaluate(alerts, prices, clock, today):
 
 def check(cfg, quiet=False):
     st = load()
-    clock = T.market_clock()
-    syms = sorted({a["symbol"] for a in st["alerts"] if a["kind"] != "bell" and (not a.get("fired") or a.get("repeat"))})
+    clock = T.market_clock(cfg=cfg)
+    syms = sorted({a["symbol"] for a in st["alerts"] if a["kind"] != "session" and (not a.get("fired") or a.get("repeat"))})
     prices, errors = {}, []
     for s in syms:
         try:
@@ -112,7 +120,7 @@ def main(argv=None):
     ad = sub.add_parser("add")
     ad.add_argument("symbol")
     ad.add_argument("kind", choices=KINDS)
-    ad.add_argument("level", type=float, nargs="?")
+    ad.add_argument("level", nargs="?", help="price, percent, or a session name")
     ad.add_argument("--note", default="")
     ad.add_argument("--repeat", action="store_true")
     sub.add_parser("list")
@@ -132,18 +140,26 @@ def main(argv=None):
     st = load()
 
     if a.cmd == "add":
-        if a.kind != "bell" and a.level is None:
-            T.die("%s needs a level" % a.kind)
-        al = {"id": st["next_id"], "symbol": a.symbol.upper(), "kind": a.kind, "level": a.level, "note": a.note,
+        if a.level is None:
+            T.die("%s needs a %s" % (a.kind, "session name" if a.kind == "session" else "level"))
+        sym = T.norm_symbol(a.symbol)
+        al = {"id": st["next_id"], "symbol": sym, "kind": a.kind, "level": None, "note": a.note,
               "repeat": a.repeat, "created": T.ny_now().isoformat(timespec="seconds"), "fired": None}
+        if a.kind == "session":
+            key = a.level.lower().replace(" ", "")
+            if key not in SESSION_NAMES:
+                T.die("session must be one of: london, newyork, tokyo, sydney, overlap")
+            al["session"] = SESSION_NAMES[key]
+        else:
+            al["level"] = float(a.level)
         st["alerts"].append(al)
         st["next_id"] += 1
         save(st)
         T.emit(dict(alert=al, text="alert #%d: %s %s %s%s" % (al["id"], al["symbol"], a.kind,
-                                                               "" if a.level is None else a.level,
+                                                               al.get("session") or T.px(al["level"], sym) if a.kind != "pct" else al["level"],
                                                                "%" if a.kind == "pct" else "")), a.json)
     elif a.cmd == "list":
-        L = ["#%-3s %-6s %-6s %-8s %s%s" % (x["id"], x["symbol"], x["kind"], "" if x["level"] is None else x["level"],
+        L = ["#%-3s %-7s %-7s %-9s %s%s" % (x["id"], x["symbol"], x["kind"], x.get("session") or ("" if x["level"] is None else x["level"]),
                                            ("fired " + x["fired"]) if x.get("fired") else "armed",
                                            "  | " + x["note"] if x.get("note") else "") for x in st["alerts"]]
         T.emit({"alerts": st["alerts"], "text": "\n".join(L) or "no alerts"}, a.json)
@@ -172,7 +188,7 @@ def main(argv=None):
                 r = check(cfg, quiet=True)
                 if r["text"]:
                     print(r["text"], flush=True)
-                clock = T.market_clock()
+                clock = T.market_clock(cfg=cfg)
                 if a.max_minutes and time.time() - t0 > a.max_minutes * 60:
                     break
                 if not clock["open"] and not a.max_minutes and clock.get("minutes_to_open", 0) > 60:
@@ -182,15 +198,19 @@ def main(argv=None):
         except KeyboardInterrupt:
             pass
     elif a.cmd == "price":
-        out = {s.upper(): T.get_price(s, cfg) for s in a.symbols}
+        out = {T.norm_symbol(s): T.get_price(s, cfg) for s in a.symbols}
         allp = T.load_json(T.tpath("prices.json"), {}) or {}
         allp.update(out)
         T.save_json(T.tpath("prices.json"), allp)
-        T.emit({"prices": out, "text": "\n".join("%s %.2f (prev close %s, %s)" % (
-            k, v["price"], v.get("prev_close"), v["source"]) for k, v in out.items())}, a.json)
+        T.emit({"prices": out, "text": "\n".join("%s %s (prev close %s%s, %s)" % (
+            k, T.px(v["price"], k), T.px(v.get("prev_close"), k),
+            ", spread %s pips" % v["spread_pips"] if v.get("spread_pips") is not None else "", v["source"])
+            for k, v in out.items())}, a.json)
     else:
-        c = T.market_clock()
-        txt = c["status"] + (", closes %s" % c["closes_at"] if c["open"] else ", next open %s" % c["next_open"])
+        c = T.market_clock(cfg=cfg)
+        txt = "%s | your time %s | %s" % (c["status"], c["now_local"],
+                                         ("closes %s" % c["closes_at"]) if c["open"] else ("opens %s" % c["next_open"]))
+        txt = "\n".join([txt] + c.get("warnings", []))
         T.emit(dict(c, text=txt), a.json)
     return 0
 

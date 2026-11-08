@@ -1,15 +1,16 @@
 ---
 name: price-alerts
 description: >-
-  Price Alerts. Rings once when a US stock crosses a price (above, below or
-  either way), moves a set percent from the previous close, or when the NYSE
-  opening bell rings; can re-arm after price comes back. Knows NYSE hours,
-  2026-2027 holidays and 1 p.m. early closes. Prices from MetaTrader 5 when
-  connected (live) or Yahoo (delayed). `watch` keeps checking until the close;
-  `check` runs once (good for a scheduled task or /loop). Use when the user
-  says "alert me when", "tell me if AAPL hits 200", "notify me", "watch this
-  price", "is the market open", "when does the market open", "price of X",
-  "نبهني", "تنبيه سعر", "إذا وصل السعر", "متى يفتح السوق", "السوق مفتوح؟".
+  Price Alerts for forex and gold. Rings once when a pair crosses a price
+  (above, below or either way), moves a set percent from the previous daily
+  close, or when a trading session opens (Sydney, Tokyo, London, New York,
+  London/New York overlap); can re-arm after price comes back. Knows forex
+  hours (Sunday 17:00 to Friday 17:00 New York) and shows times in the user's
+  zone. Prices from MetaTrader 5 desktop (live) or Yahoo (delayed). Also
+  explains how to set native alerts in the MT5 phone app. Use when the user
+  says "alert me when EURUSD hits", "notify me", "watch this price", "tell me
+  when London opens", "is the market open", "نبهني", "تنبيه سعر", "إذا وصل
+  السعر", "متى تفتح جلسة لندن", "السوق مفتوح؟".
 ---
 
 # Price Alerts
@@ -19,39 +20,40 @@ description: >-
 From the user's project folder (`SKILL` = this skill's folder; `python` on Windows):
 
 ```bash
-python3 SKILL/alerts.py add AAPL above 200 --note "breakout"
-python3 SKILL/alerts.py add AAPL below 180
-python3 SKILL/alerts.py add TSLA cross 250          # either direction
-python3 SKILL/alerts.py add NVDA pct 5              # +/-5% from previous close, once a day
-python3 SKILL/alerts.py add SPY bell                # opening bell, once a day
-python3 SKILL/alerts.py add AAPL above 200 --repeat # re-arms after price falls back below
-python3 SKILL/alerts.py list
-python3 SKILL/alerts.py remove 3 | rearm 3 | clear
-python3 SKILL/alerts.py check                       # one pass
-python3 SKILL/alerts.py watch --every 60            # loop until the close (Ctrl+C stops)
-python3 SKILL/alerts.py price AAPL MSFT             # quick quote
-python3 SKILL/alerts.py clock                       # NYSE open/closed
+python3 SKILL/alerts.py add EURUSD above 1.0900 --note "breakout"
+python3 SKILL/alerts.py add EURUSD below 1.0800
+python3 SKILL/alerts.py add GBPJPY cross 193.00        # either direction
+python3 SKILL/alerts.py add XAUUSD pct 1               # +/-1% from previous daily close
+python3 SKILL/alerts.py add EURUSD session london      # london | newyork | tokyo | sydney | overlap
+python3 SKILL/alerts.py add EURUSD above 1.0900 --repeat   # re-arms after price falls back
+python3 SKILL/alerts.py list | remove 3 | rearm 3 | clear
+python3 SKILL/alerts.py check                          # one pass
+python3 SKILL/alerts.py watch --every 60               # loop while forex is open (Ctrl+C stops)
+python3 SKILL/alerts.py price EURUSD USDJPY            # quick quote (spread too, with MT5)
+python3 SKILL/alerts.py clock                          # open/closed, sessions, your time
 ```
 
 ## Keeping alerts running
 
-An alert only rings while something is checking. Tell the user which option
-fits them:
+An alert only rings while something checks. Tell the user which fits:
 
-1. **This session**: run `watch` in the background and report when it rings.
-2. **Claude Code `/loop`**: `/loop 5m python3 SKILL/alerts.py check` keeps
-   checking every 5 minutes while the session is open.
-3. **Always on (Windows)**: a Task Scheduler job that runs `check` every few
-   minutes on market days. Offer to write the command for them.
-4. **MetaTrader 5 itself**: MT5 has native price alerts with push
-   notifications to the MT5 phone app (Tools -> Options -> Notifications).
-   For 24/7 alerts on the phone this is the most reliable, and the user can
-   set it up in the terminal: walk them through it.
+1. **MetaTrader 5 phone app (best for a phone-only trader).** Native alerts
+   with push notifications, 24/5, no computer needed. Walk them through it:
+   on iPhone/Android: Quotes (الأسعار) -> tap the pair -> the alarm-clock /
+   Alerts option (on some versions: Settings (إعدادات) -> Alerts / تنبيهات)
+   -> + -> condition "Bid >" or "Bid <" -> value -> Done. Menu names differ a
+   little between app versions; if unsure, ask the user for a screenshot of
+   their menu.
+2. **This session**: run `watch` in the background and report when it rings.
+3. **Claude Code `/loop`**: `/loop 5m python3 SKILL/alerts.py check`.
+4. **Always on (Windows)**: a Task Scheduler job running `check` every few
+   minutes; offer to write it.
 
-Yahoo prices are delayed (~15 minutes for some feeds); MT5 prices are live.
+Yahoo forex prices are delayed and are mid prices; MT5 alerts use the
+broker's bid. Small differences of a pip or two are normal.
 
 ## Answer format
 
 In the user's language. Confirm each alert in one line ("تم: تنبيه #1 إذا
-تجاوز AAPL سعر 200"). When an alert rings, lead with it, then suggest the next
-step (e.g. `entry-timer` for a breakout, `exit-planner trail` for a position).
+تجاوز EURUSD مستوى 1.0900"). When one rings, lead with it, then the next step
+(`entry-timer` for a breakout, `exit-planner trail` for an open trade).

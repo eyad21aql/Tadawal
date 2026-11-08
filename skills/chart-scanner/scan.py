@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Chart Scanner: reads the chart of SYMBOL and lists what is on it.
+"""Chart Scanner: reads the chart of a currency pair and lists what is on it.
 
-    python3 scan.py AAPL                     # daily, last 250 bars
-    python3 scan.py NVDA --tf H4 --svg trader/charts/nvda.svg
-    python3 scan.py AAPL --csv aapl_d1.csv --json
+    python3 scan.py EURUSD                   # H1, last 300 bars
+    python3 scan.py GBPJPY --tf H4 --svg trader/charts/gbpjpy.svg
+    python3 scan.py XAUUSD --tf D1 --csv xauusd_d1.csv --json
 
 Finds: trend structure (HH/HL), support/resistance, candlestick patterns on the
 last bars, double tops/bottoms, head and shoulders (and inverse), triangles,
-wedges, channels and ranges, level breakouts with volume, RSI divergences and
-gaps. Each finding says bullish/bearish, forming or confirmed, the key level
+wedges, channels and ranges, level breakouts (with tick volume when the data
+has it), RSI divergences and weekend gaps. Each finding says bullish/bearish, forming or confirmed, the key level
 and a measured-move target where one exists.
 """
 import argparse
@@ -18,6 +18,10 @@ import sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.join(_HERE, "_lib"), os.path.join(_HERE, "..", "_lib")]
 import tadawal as T  # noqa: E402
+
+
+def P(x):
+    return T.px(x)
 
 
 def _f(kind, name, bias, idx, b, status="", level=None, target=None, conf="medium", note=""):
@@ -74,7 +78,7 @@ def candles(b, look=5):
             out.append(_f("candle", "three black crows", "bearish", i, b))
         if h < b.h[i - 1] and l > b.l[i - 1]:
             out.append(_f("candle", "inside bar", "neutral", i, b, level=b.h[i - 1],
-                          note="breakout of %.2f / %.2f sets the direction" % (b.h[i - 1], b.l[i - 1])))
+                          note="breakout of %s / %s sets the direction" % (P(b.h[i - 1]), P(b.l[i - 1]))))
         if body >= 2 * avgb and upper + lower <= 0.2 * rng:
             out.append(_f("candle", "wide-range %s bar" % ("bull" if c > o else "bear"),
                           "bullish" if c > o else "bearish", i, b, note="strong momentum"))
@@ -123,7 +127,7 @@ def patterns(b, a, piv):
                 continue  # invalidated: price is back above both tops
             st = "confirmed (closed below neckline)" if px < neck else "forming"
             out.append(_f("pattern", "double top", "bearish", p3[0], b, st, neck, neck - (top - neck),
-                          "high" if px < neck else "medium", "neckline %.2f" % neck))
+                          "high" if px < neck else "medium", "neckline %s" % P(neck)))
             break
         if t1 == "L" and t2 == "H" and t3 == "L" and abs(p1[2] - p3[2]) <= tol and p2[2] - max(p1[2], p3[2]) >= 2 * tol:
             neck = p2[2]
@@ -132,7 +136,7 @@ def patterns(b, a, piv):
                 continue  # invalidated: price is back below both bottoms
             st = "confirmed (closed above neckline)" if px > neck else "forming"
             out.append(_f("pattern", "double bottom", "bullish", p3[0], b, st, neck, neck + (neck - bot),
-                          "high" if px > neck else "medium", "neckline %.2f" % neck))
+                          "high" if px > neck else "medium", "neckline %s" % P(neck)))
             break
 
     for k in range(len(piv) - 5, -1, -1):
@@ -150,7 +154,7 @@ def patterns(b, a, piv):
                 st = "confirmed (closed below neckline)" if px < nn else "forming"
                 out.append(_f("pattern", "head and shoulders", "bearish", h3[0], b, st, nn,
                               nn - (h2[2] - neck(h2[0])), "high" if px < nn else "medium",
-                              "head %.2f, neckline now %.2f" % (h2[2], nn)))
+                              "head %s, neckline now %s" % (P(h2[2]), P(nn))))
                 break
         if kinds == "LHLHL":
             l1, h1, l2, h2, l3 = s
@@ -161,7 +165,7 @@ def patterns(b, a, piv):
                 st = "confirmed (closed above neckline)" if px > nn else "forming"
                 out.append(_f("pattern", "inverse head and shoulders", "bullish", l3[0], b, st, nn,
                               nn + (neck(l2[0]) - l2[2]), "high" if px > nn else "medium",
-                              "head %.2f, neckline now %.2f" % (l2[2], nn)))
+                              "head %s, neckline now %s" % (P(l2[2]), P(nn))))
                 break
 
     tail = [p for p in piv if p[0] >= max(5, n - 120) and not p[1].endswith("*")][-5:]
@@ -199,9 +203,9 @@ def patterns(b, a, piv):
             elif px < d - 0.1 * a:
                 st, tgt = "broke down", d - height
             else:
-                st, tgt = "inside, between %.2f and %.2f" % (d, u), None
+                st, tgt = "inside, between %s and %s" % (P(d), P(u)), None
             out.append(_f("pattern", name, bias, n - 1, b, st, u if px >= (u + d) / 2 else d, tgt,
-                          "medium", "upper line %.2f, lower line %.2f" % (u, d)))
+                          "medium", "upper line %s, lower line %s" % (P(u), P(d))))
     return out
 
 
@@ -213,12 +217,12 @@ def divergences(b):
     ls = [p for p in piv if p[1] == "L"][-2:]
     if len(hs) == 2 and hs[1][2] > hs[0][2] and rs[hs[1][0]] < rs[hs[0][0]] - 2:
         out.append(_f("divergence", "bearish RSI divergence", "bearish", hs[1][0], b, level=hs[1][2],
-                      note="higher high in price (%.2f>%.2f), lower high in RSI (%.0f<%.0f)" %
-                      (hs[1][2], hs[0][2], rs[hs[1][0]], rs[hs[0][0]])))
+                      note="higher high in price (%s>%s), lower high in RSI (%.0f<%.0f)" %
+                      (P(hs[1][2]), P(hs[0][2]), rs[hs[1][0]], rs[hs[0][0]])))
     if len(ls) == 2 and ls[1][2] < ls[0][2] and rs[ls[1][0]] > rs[ls[0][0]] + 2:
         out.append(_f("divergence", "bullish RSI divergence", "bullish", ls[1][0], b, level=ls[1][2],
-                      note="lower low in price (%.2f<%.2f), higher low in RSI (%.0f>%.0f)" %
-                      (ls[1][2], ls[0][2], rs[ls[1][0]], rs[ls[0][0]])))
+                      note="lower low in price (%s<%s), higher low in RSI (%.0f>%.0f)" %
+                      (P(ls[1][2]), P(ls[0][2]), rs[ls[1][0]], rs[ls[0][0]])))
     return out
 
 
@@ -226,18 +230,22 @@ def breakouts(b, lv, a):
     out = []
     n = len(b)
     vavg = T.sma(b.v, 20)
+    vol = b.has_volume()
     for i in range(max(1, n - 3), n):
         for L in lv:
             p = L["price"]
-            volx = b.v[i] / vavg[i] if vavg[i] else 0
+            if vol:
+                volx = b.v[i] / vavg[i] if vavg[i] else 0
+                st, conf = "tick volume %.1fx avg" % volx, ("high" if volx >= 1.5 else "low")
+                weak = volx < 1.5
+            else:
+                st, conf, weak = "no volume data", "medium", False
             if b.c[i - 1] <= p < b.c[i] and b.c[i] - p >= 0.1 * a:
-                out.append(_f("breakout", "broke above %.2f" % p, "bullish", i, b, "volume %.1fx avg" % volx, p,
-                              conf="high" if volx >= 1.5 else "low",
-                              note="" if volx >= 1.5 else "weak volume: could be a false breakout"))
+                out.append(_f("breakout", "broke above %s" % P(p), "bullish", i, b, st, p, conf=conf,
+                              note="weak volume: could be a false breakout" if weak else "wait for a retest of the level"))
             if b.c[i - 1] >= p > b.c[i] and p - b.c[i] >= 0.1 * a:
-                out.append(_f("breakout", "broke below %.2f" % p, "bearish", i, b, "volume %.1fx avg" % volx, p,
-                              conf="high" if volx >= 1.5 else "low",
-                              note="" if volx >= 1.5 else "weak volume: could be a false breakdown"))
+                out.append(_f("breakout", "broke below %s" % P(p), "bearish", i, b, st, p, conf=conf,
+                              note="weak volume: could be a false breakdown" if weak else "wait for a retest of the level"))
     return out
 
 
@@ -248,15 +256,16 @@ def gaps(b, look=10):
         if b.l[i] > b.h[i - 1]:
             filled = min(b.l[i:]) <= b.h[i - 1]
             out.append(_f("gap", "gap up", "bullish", i, b, "filled" if filled else "open", b.h[i - 1],
-                          note="gap zone %.2f-%.2f" % (b.h[i - 1], b.l[i])))
+                          note="gap zone %s-%s" % (P(b.h[i - 1]), P(b.l[i]))))
         elif b.h[i] < b.l[i - 1]:
             filled = max(b.h[i:]) >= b.l[i - 1]
             out.append(_f("gap", "gap down", "bearish", i, b, "filled" if filled else "open", b.l[i - 1],
-                          note="gap zone %.2f-%.2f" % (b.h[i], b.l[i - 1])))
+                          note="gap zone %s-%s" % (P(b.h[i]), P(b.l[i - 1]))))
     return out
 
 
 def scan(b, zz_atr=2.0, candle_look=5):
+    T.set_symbol(b.symbol)
     if len(b) < 60:
         T.die("need at least 60 bars, got %d" % len(b))
     a = T.atr(b, 14)[-1]
@@ -275,9 +284,9 @@ def scan(b, zz_atr=2.0, candle_look=5):
 
 def render(o):
     L = ["CHART SCANNER  %s %s  (%s, last bar %s)" % (o["symbol"], o["tf"], o["source"], o["bar"]),
-         "price %s | ATR %s | structure: %s" % (o["price"], o["atr14"], o["structure"]),
-         "levels: " + ", ".join("%.2f(x%d)" % (x["price"], x["touches"]) for x in o["levels"]),
-         "swings: " + " ".join("%s %s@%s" % (s["bar"], s["type"], s["price"]) for s in o["swings"]), ""]
+         "price %s | ATR %s (%s pips) | structure: %s" % (P(o["price"]), P(o["atr14"]), T.pips(o["atr14"], o["symbol"]), o["structure"]),
+         "levels: " + ", ".join("%s(x%d)" % (P(x["price"]), x["touches"]) for x in o["levels"]),
+         "swings: " + " ".join("%s %s@%s" % (s["bar"], s["type"], P(s["price"])) for s in o["swings"]), ""]
     if not o["findings"]:
         L.append("no patterns on the recent bars")
     for f in o["findings"]:
@@ -285,9 +294,9 @@ def render(o):
         if f["status"]:
             bits.append(f["status"])
         if f["level"] is not None:
-            bits.append("level %s" % f["level"])
+            bits.append("level %s" % P(f["level"]))
         if f["target"] is not None:
-            bits.append("target %s" % f["target"])
+            bits.append("target %s (%+.0f pips)" % (P(f["target"]), T.pips(f["target"] - o["price"], o["symbol"])))
         bits.append("conf %s" % f["confidence"])
         if f["note"]:
             bits.append(f["note"])
@@ -315,7 +324,7 @@ def svg(b, o, path, last=150):
     for L in lv:
         e.append('<line x1="%d" x2="%d" y1="%.1f" y2="%.1f" stroke="#888" stroke-dasharray="4 3"/>'
                  % (pad, W - pad, y(L["price"]), y(L["price"])))
-        e.append('<text x="%d" y="%.1f" fill="#555">%.2f</text>' % (W - pad + 3, y(L["price"]) + 4, L["price"]))
+        e.append('<text x="%d" y="%.1f" fill="#555">%s</text>' % (W - pad + 3, y(L["price"]) + 4, P(L["price"])))
     e20 = T.ema(b.c, 20)[off:]
     pts = " ".join("%.1f,%.1f" % (x(i), y(v)) for i, v in enumerate(e20) if v is not None)
     e.append('<polyline points="%s" fill="none" stroke="#2b6cb0" stroke-width="1.2"/>' % pts)
@@ -344,7 +353,7 @@ def svg(b, o, path, last=150):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("symbol")
-    T.add_data_args(ap, "D1", 250)
+    T.add_data_args(ap, "H1", 300)
     ap.add_argument("--swing-atr", type=float, default=2.0, help="zigzag swing size in ATRs (default 2)")
     ap.add_argument("--candles", type=int, default=5, help="how many recent bars to check for candle patterns")
     ap.add_argument("--svg", help="also draw the chart to this .svg file")

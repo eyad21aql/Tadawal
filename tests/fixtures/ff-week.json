@@ -1,0 +1,70 @@
+[
+ {
+  "title": "ISM Services PMI",
+  "country": "USD",
+  "date": "2026-11-04T10:00:00-05:00",
+  "impact": "High",
+  "forecast": "52.1",
+  "previous": "51.5",
+  "actual": "53.4"
+ },
+ {
+  "title": "Unemployment Claims",
+  "country": "USD",
+  "date": "2026-11-05T08:30:00-05:00",
+  "impact": "Medium",
+  "forecast": "221K",
+  "previous": "218K",
+  "actual": "235K"
+ },
+ {
+  "title": "Non-Farm Employment Change",
+  "country": "USD",
+  "date": "2026-11-06T08:30:00-05:00",
+  "impact": "High",
+  "forecast": "150K",
+  "previous": "142K"
+ },
+ {
+  "title": "German Factory Orders m/m",
+  "country": "EUR",
+  "date": "2026-11-05T02:00:00-05:00",
+  "impact": "Medium",
+  "forecast": "0.5%",
+  "previous": "-0.4%",
+  "actual": "-0.9%"
+ },
+ {
+  "title": "Official Bank Rate",
+  "country": "GBP",
+  "date": "2026-11-05T07:00:00-05:00",
+  "impact": "High",
+  "forecast": "3.75%",
+  "previous": "4.00%",
+  "actual": "3.75%"
+ },
+ {
+  "title": "CPI m/m",
+  "country": "USD",
+  "date": "2026-11-12T08:30:00-05:00",
+  "impact": "High",
+  "forecast": "0.3%",
+  "previous": "0.4%"
+ },
+ {
+  "title": "ECB President Lagarde Speaks",
+  "country": "EUR",
+  "date": "2026-11-11T09:00:00-05:00",
+  "impact": "High",
+  "forecast": "",
+  "previous": ""
+ },
+ {
+  "title": "Bank Holiday",
+  "country": "JPY",
+  "date": "2026-11-03T00:00:00-05:00",
+  "impact": "Holiday",
+  "forecast": "",
+  "previous": ""
+ }
+]

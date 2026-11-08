@@ -1,18 +1,24 @@
 #!/usr/bin/env python3
-"""Order Executor: sends an order to MetaTrader 5 (or the local paper account)
-ONLY after it passed the risk check and the user typed yes for that exact ticket.
+"""Order Executor: places an order ONLY after it passed the risk check and the
+user typed yes for that exact ticket. Three modes (trader/config.json "mode"):
 
-    python3 order.py tickets                                  # what is ready, with ticket codes
-    python3 order.py place o1 --ticket 3fa2c1d09b7e --confirm "yes"
-    python3 order.py positions                                # open positions (paper: also fills/stops)
-    python3 order.py modify 123456 --sl 188 --confirm "yes"   # stop may only tighten
-    python3 order.py close 123456 --confirm "yes" [--volume 5]
-    python3 order.py cancel o2                                # drop a proposed/pending order
-    python3 order.py account                                  # which account and mode is active
+  paper   simulated fills on a local ledger (default, no broker)
+  manual  you place the order yourself in the MetaTrader 5 phone/desktop app; this
+          prints the exact steps and records what you did (works with MT5 mobile)
+  mt5     the order is sent to the MetaTrader 5 desktop terminal (Windows)
 
-Safety gates, all enforced here and not only in the instructions:
-  * mode "paper" (default) never touches a broker.
-  * mode "mt5" refuses REAL accounts unless "allow_live": true in trader/config.json.
+    python3 order.py tickets                                   # what is ready, with ticket codes
+    python3 order.py place o1 --ticket 3fa2c1d09b7e --confirm "نعم"
+    python3 order.py filled o1 --price 1.08512                 # manual: you placed it, at this price
+    python3 order.py positions                                 # open positions (paper: fills, stops, targets)
+    python3 order.py modify 7 --sl 1.0835 --confirm "yes"      # stop may only tighten
+    python3 order.py close 7 --confirm "yes" [--volume 0.1] [--price 1.0890]
+    python3 order.py cancel o2                                 # drop a proposed/pending order
+    python3 order.py account                                   # which account and mode is active
+
+Safety gates, enforced here and not only in the instructions:
+  * mode "mt5" refuses REAL accounts unless "allow_live": true in trader/config.json,
+    refuses when Algo Trading is off, and when the spread is above max_spread_pips.
   * the order's current contents must have a PASS from risk.py check (any edit voids it),
     and that PASS must be less than 60 minutes old.
   * --ticket must match the code shown by `tickets` for those exact contents.
@@ -28,8 +34,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.join(_HERE, "_lib"), os.path.join(_HERE, "..", "_lib")]
 import tadawal as T  # noqa: E402
 
-YES = re.compile(r"^\s*(yes|y|confirm|confirmed|go|place it|do it|ok|okay|نعم|ايوه|إيوه|ايه|اي|أي|أكيد|اكيد|موافق|نفذ|نفّذ|تمام|يلا)\b",
-                 re.IGNORECASE)
+YES = re.compile(r"^\s*(yes|y|confirm|confirmed|go|place it|do it|ok|okay|done|نعم|ايوه|إيوه|ايه|اي|أي|أكيد|اكيد|موافق|"
+                 r"نفذ|نفّذ|تمام|يلا|اوكي|أوكي)\b", re.IGNORECASE)
 NO = re.compile(r"\b(no|not|don'?t|cancel|stop|wait|hold)\b"
                 r"|(?:^|\s)(?:لا|لأ|مو|ما|مب|انتظر|اصبر|الغ\w*|ألغ\w*|إلغ\w*|وقف|لحظة)(?=$|\s|[.,!?؟،])", re.IGNORECASE)
 PASS_MAX_AGE_MIN = 60
@@ -46,6 +52,10 @@ def log_exec(entry):
     T.save_json(p, log)
 
 
+def now_iso():
+    return T.ny_now().isoformat(timespec="seconds")
+
+
 def verdict_for(order):
     v = (T.load_json(T.tpath("risk_verdicts.json"), {}) or {}).get(T.order_hash(order))
     if not v or v.get("verdict") != "PASS":
@@ -59,39 +69,35 @@ def verdict_for(order):
     return v, None
 
 
-def ticket_text(o, cfg):
-    return "%s %s %s %s%s  SL %s  TP %s" % (
-        o["side"].upper(), o["volume"], o["symbol"], o.get("type", "market"),
-        "" if o.get("type", "market") == "market" else " @ %s" % o.get("entry"), o.get("sl"), o.get("tp") or "none")
+def ticket_text(o):
+    s = T.norm_symbol(o["symbol"])
+    typ = o.get("type", "market")
+    return "%s %s lots %s %s%s  SL %s  TP %s" % (
+        o["side"].upper(), o["volume"], s, typ, "" if typ == "market" else " @ %s" % T.px(o.get("entry"), s),
+        T.px(o.get("sl"), s), T.px(o.get("tp"), s) if o.get("tp") else "none")
 
 
-# ------------------------------------------------------------------ paper
+# ------------------------------------------------------------------ ledger (paper + manual)
 
-def paper_fill(o, cfg, price):
+def ledger_open(o, cfg, price, mode, note=""):
     st = T.paper_state(cfg)
     spec = T.symbol_spec(o["symbol"], cfg)
-    typ = o.get("type", "market")
-    now = T.ny_now().isoformat(timespec="seconds")
-    if typ != "market":
-        st.setdefault("pending", []).append(dict(o, placed=now))
-        T.save_paper(st)
-        return {"status": "pending", "msg": "paper %s order resting at %s" % (typ, o["entry"])}
     pid = st["next_id"]
     st["next_id"] += 1
-    pos = {"id": pid, "symbol": o["symbol"], "side": o["side"], "volume": o["volume"], "entry": price,
-           "sl": o.get("sl"), "tp": o.get("tp"), "price": price, "mpp": T.money_per_point(spec), "opened": now,
-           "order_id": o.get("id")}
+    pos = {"id": pid, "symbol": T.norm_symbol(o["symbol"]), "side": o["side"], "volume": o["volume"], "entry": price,
+           "sl": o.get("sl"), "tp": o.get("tp"), "price": price, "mpp": T.money_per_point(spec), "opened": now_iso(),
+           "order_id": o.get("id"), "mode": mode}
     st["positions"].append(pos)
     T.save_paper(st)
     j = T.journal()
-    j["trades"].append({"id": "p%d" % pid, "position": pid, "order_id": o.get("id"), "mode": "paper",
-                        "symbol": o["symbol"], "side": o["side"], "volume": o["volume"], "entry": price,
-                        "sl": o.get("sl"), "tp": o.get("tp"), "opened_at": now, "status": "open"})
+    j["trades"].append({"id": "%s%d" % (mode[0], pid), "position": pid, "order_id": o.get("id"), "mode": mode,
+                        "symbol": pos["symbol"], "side": o["side"], "volume": o["volume"], "entry": price,
+                        "sl": o.get("sl"), "tp": o.get("tp"), "opened_at": pos["opened"], "status": "open", "note": note})
     T.save_journal(j)
-    return {"status": "filled", "position": pid, "price": price, "msg": "paper fill at %.4f" % price}
+    return pos
 
 
-def paper_close(st, pos, price, why, volume=None):
+def ledger_close(st, pos, price, why, volume=None):
     vol = min(volume or pos["volume"], pos["volume"])
     sgn = 1 if pos["side"] == "buy" else -1
     pnl = round(sgn * (price - pos["entry"]) * vol * pos.get("mpp", 1), 2)
@@ -99,64 +105,91 @@ def paper_close(st, pos, price, why, volume=None):
     pos["volume"] = round(pos["volume"] - vol, 8)
     if pos["volume"] <= 1e-9:
         st["positions"] = [p for p in st["positions"] if p["id"] != pos["id"]]
-    now = T.ny_now().isoformat(timespec="seconds")
     j = T.journal()
     for t in j["trades"]:
-        if t.get("position") == pos["id"] and t.get("mode") == "paper" and t["status"] == "open":
+        if t.get("position") == pos["id"] and t.get("mode") in ("paper", "manual") and t["status"] == "open":
             risk = abs(t["entry"] - t["sl"]) * vol * pos.get("mpp", 1) if t.get("sl") else None
-            if vol < t["volume"]:
-                part = dict(t, volume=vol, exit=price, pnl=pnl, closed_at=now, status="closed", why=why,
-                            id=t["id"] + "-%d" % len(j["trades"]), r=round(pnl / risk, 2) if risk else None)
-                j["trades"].append(part)
+            rec = dict(exit=price, pnl=pnl, closed_at=now_iso(), status="closed", why=why,
+                       pips=T.pips(sgn * (price - t["entry"]), t["symbol"]), r=round(pnl / risk, 2) if risk else None)
+            if vol < t["volume"] - 1e-9:
+                j["trades"].append(dict(t, volume=vol, id=t["id"] + "-%d" % len(j["trades"]), **rec))
                 t["volume"] = round(t["volume"] - vol, 8)
             else:
-                t.update(exit=price, pnl=pnl, closed_at=now, status="closed", why=why,
-                         r=round(pnl / risk, 2) if risk else None)
+                t.update(rec)
             break
     T.save_journal(j)
     return pnl
 
 
-def paper_sync(cfg):
-    """Fill resting paper orders and apply stops/targets at the current price."""
+def ledger_sync(cfg):
+    """Paper: fill resting orders, apply stops/targets at the current price.
+    Manual: only flag positions whose stop or target was probably hit."""
     st = T.paper_state(cfg)
-    events = []
-    syms = {p["symbol"] for p in st["positions"]} | {o["symbol"] for o in st.get("pending", [])}
-    prices = {}
-    for s in syms:
+    manual = cfg["mode"] == "manual"
+    events, prices = [], {}
+    for s in {p["symbol"] for p in st["positions"]} | {o["symbol"] for o in st.get("pending", [])}:
         try:
             prices[s] = T.get_price(s, cfg)["price"]
         except SystemExit:
             pass
     keep = []
     for o in st.get("pending", []):
-        px = prices.get(o["symbol"])
-        trig = px is not None and (
-            (o["type"] == "limit" and ((o["side"] == "buy" and px <= o["entry"]) or (o["side"] == "sell" and px >= o["entry"]))) or
-            (o["type"] == "stop" and ((o["side"] == "buy" and px >= o["entry"]) or (o["side"] == "sell" and px <= o["entry"]))))
+        p = prices.get(T.norm_symbol(o["symbol"]))
+        buy = o["side"] == "buy"
+        trig = p is not None and ((o["type"] == "limit" and ((buy and p <= o["entry"]) or (not buy and p >= o["entry"])))
+                                  or (o["type"] == "stop" and ((buy and p >= o["entry"]) or (not buy and p <= o["entry"]))))
         if trig:
-            T.save_paper(st)
-            fillpx = o["entry"] if o["type"] == "limit" else px
-            r = paper_fill(dict(o, type="market"), cfg, fillpx)
+            T.save_paper(dict(st, pending=keep + [x for x in st["pending"] if x is not o and x not in keep]))
+            fill = o["entry"] if o["type"] == "limit" else p
+            pos = ledger_open(o, cfg, fill, "paper")
             st = T.paper_state(cfg)
-            events.append("paper %s order %s filled at %.4f (position %s)" % (o["type"], o.get("id"), fillpx, r["position"]))
+            events.append("paper %s order %s filled at %s (position %s)" % (o["type"], o.get("id"), T.px(fill, o["symbol"]), pos["id"]))
         else:
             keep.append(o)
     st["pending"] = keep
     for pos in list(st["positions"]):
-        px = prices.get(pos["symbol"])
-        if px is None:
+        p = prices.get(pos["symbol"])
+        if p is None:
             continue
-        pos["price"] = px
+        pos["price"] = p
         long = pos["side"] == "buy"
-        if pos.get("sl") and ((long and px <= pos["sl"]) or (not long and px >= pos["sl"])):
-            pnl = paper_close(st, pos, pos["sl"], "stop")
-            events.append("paper position %s stopped at %s (%+.2f)" % (pos["id"], pos["sl"], pnl))
-        elif pos.get("tp") and ((long and px >= pos["tp"]) or (not long and px <= pos["tp"])):
-            pnl = paper_close(st, pos, pos["tp"], "target")
-            events.append("paper position %s hit target %s (%+.2f)" % (pos["id"], pos["tp"], pnl))
+        hit = None
+        if pos.get("sl") and ((long and p <= pos["sl"]) or (not long and p >= pos["sl"])):
+            hit = ("stop", pos["sl"])
+        elif pos.get("tp") and ((long and p >= pos["tp"]) or (not long and p <= pos["tp"])):
+            hit = ("target", pos["tp"])
+        if hit and manual:
+            events.append("position %s %s: price %s passed the %s %s. Check the MT5 app; if it closed, record it: "
+                          "order.py close %s --price %s --confirm yes" % (pos["id"], pos["symbol"], T.px(p, pos["symbol"]),
+                                                                           hit[0], T.px(hit[1], pos["symbol"]), pos["id"],
+                                                                           T.px(hit[1], pos["symbol"])))
+        elif hit:
+            pnl = ledger_close(st, pos, hit[1], hit[0])
+            events.append("paper position %s closed at %s %s (%+.2f)" % (pos["id"], hit[0], T.px(hit[1], pos["symbol"]), pnl))
     T.save_paper(st)
     return events
+
+
+def manual_steps(o, cfg):
+    s = T.broker_symbol(o["symbol"], cfg)
+    typ = o.get("type", "market")
+    kind = {"market": "Market Execution / تنفيذ فوري",
+            ("buy", "limit"): "Buy Limit", ("sell", "limit"): "Sell Limit",
+            ("buy", "stop"): "Buy Stop", ("sell", "stop"): "Sell Stop"}
+    k = kind["market"] if typ == "market" else kind[(o["side"], typ)]
+    P = lambda x: T.px(x, o["symbol"])  # noqa: E731
+    L = ["Place it in the MetaTrader 5 app:",
+         "  1. Quotes (الأسعار) -> tap %s -> Trade (تداول)" % s,
+         "  2. Order type: %s" % k]
+    if typ != "market":
+        L.append("  3. Price: %s" % P(o["entry"]))
+    L += ["  %d. Volume: %s" % (4 if typ != "market" else 3, o["volume"]),
+          "  %d. Stop Loss: %s    Take Profit: %s" % (5 if typ != "market" else 4, P(o.get("sl")), P(o.get("tp")) if o.get("tp") else "-"),
+          "  %d. Press %s" % (6 if typ != "market" else 5,
+                              ("Buy by Market / شراء" if o["side"] == "buy" else "Sell by Market / بيع") if typ == "market" else "Place / وضع"),
+          "Then tell Claude the fill price (or send a screenshot of the trade) so it is recorded:",
+          "  order.py filled %s --price <fill price>" % o.get("id")]
+    return "\n".join(L)
 
 
 # ------------------------------------------------------------------ MT5
@@ -200,9 +233,12 @@ def mt5_place(o, cfg):
     mt5, ai = mt5_guard(cfg)
     sym = T.broker_symbol(o["symbol"], cfg)
     if not mt5.symbol_select(sym, True):
-        T.die("symbol %s not available at your broker" % sym)
+        T.die("symbol %s not available at your broker (symbol_suffix / symbol_map in trader/config.json)" % sym)
     si = mt5.symbol_info(sym)
     tk = mt5.symbol_info_tick(sym)
+    spread = T.pips(tk.ask - tk.bid, o["symbol"])
+    if spread > float(cfg.get("max_spread_pips", 3)):
+        T.die("spread is %s pips, above max_spread_pips %s: wait for normal liquidity" % (spread, cfg.get("max_spread_pips")))
     d = si.digits
     typ = o.get("type", "market")
     buy = o["side"] == "buy"
@@ -222,21 +258,18 @@ def mt5_place(o, cfg):
                    type_filling=mt5.ORDER_FILLING_RETURN)
     ok, info = mt5_send(mt5, req)
     if not ok:
-        return {"status": "rejected", "msg": str(info), "request": _plain(req)}
+        return {"status": "rejected", "msg": str(info), "request": req}
     st = "filled" if typ == "market" else "pending"
     if st == "filled":
         j = T.journal()
         j["trades"].append({"id": "m%s" % info["deal"], "position": info["order"], "order_id": o.get("id"), "mode": "mt5",
-                            "account": ai.login, "symbol": o["symbol"], "side": o["side"], "volume": info["volume"],
-                            "entry": info["price"], "sl": o.get("sl"), "tp": o.get("tp"),
-                            "opened_at": T.ny_now().isoformat(timespec="seconds"), "status": "open"})
+                            "account": ai.login, "symbol": T.norm_symbol(o["symbol"]), "side": o["side"],
+                            "volume": info["volume"], "entry": info["price"], "sl": o.get("sl"), "tp": o.get("tp"),
+                            "opened_at": now_iso(), "status": "open"})
         T.save_journal(j)
-    return {"status": st, "msg": "MT5 %s: retcode %s %s" % (st, info["retcode"], info["comment"]), "result": info,
-            "request": _plain(req), "account": "%s (%s)" % (ai.login, {0: "demo", 1: "contest", 2: "REAL"}.get(ai.trade_mode))}
-
-
-def _plain(req):
-    return {k: (float(v) if isinstance(v, float) else v) for k, v in req.items()}
+    return {"status": st, "msg": "MT5 %s: retcode %s %s (spread %s pips)" % (st, info["retcode"], info["comment"], spread),
+            "result": info, "request": req,
+            "account": "%s (%s)" % (ai.login, {0: "demo", 1: "contest", 2: "REAL"}.get(ai.trade_mode))}
 
 
 # ------------------------------------------------------------------ commands
@@ -253,21 +286,20 @@ def cmd_tickets(a, cfg):
     L = ["TICKETS  (mode %s%s)" % (cfg["mode"], ", LIVE ALLOWED" if cfg.get("allow_live") else "")]
     out = []
     for o in data["orders"]:
-        if o.get("status") in ("placed", "cancelled"):
+        if o.get("status") in ("placed", "sent_manual", "cancelled"):
             continue
         v, why = verdict_for(o)
         h = T.order_hash(o)
         if v:
-            L.append("READY  %s  ticket %s  %s" % (o["id"], h, ticket_text(o, cfg)))
-            for w in v.get("warnings", []):
-                L.append("       ! " + w)
+            L.append("READY  %s  ticket %s  %s" % (o["id"], h, ticket_text(o)))
+            L += ["       ! " + w for w in v.get("warnings", [])]
         else:
-            L.append("NOT READY  %s  %s  -> %s" % (o["id"], ticket_text(o, cfg), why))
+            L.append("NOT READY  %s  %s  -> %s" % (o["id"], ticket_text(o), why))
         out.append({"id": o["id"], "ticket": h if v else None, "ready": bool(v), "why": why, "order": o})
     if len(L) == 1:
-        L.append("no orders. Size one with: risk.py size SYMBOL --entry X --stop Y --target Z --write")
+        L.append("no orders. Size one with: risk.py size PAIR --entry X --stop Y --target Z --write")
     else:
-        L.append("To place: the user must reply yes for a specific ticket; then order.py place ID --ticket CODE --confirm \"<their words>\"")
+        L.append("To place: the user replies yes for one ticket; then order.py place ID --ticket CODE --confirm \"<their words>\"")
     T.emit({"tickets": out, "text": "\n".join(L)}, a.json)
     return 0
 
@@ -275,7 +307,7 @@ def cmd_tickets(a, cfg):
 def cmd_place(a, cfg):
     data = T.load_orders()
     o = find_order(data, a.order_id)
-    if o.get("status") == "placed":
+    if o.get("status") in ("placed", "sent_manual"):
         T.die("order %s was already placed (%s)" % (o["id"], o.get("placed_at")))
     h = T.order_hash(o)
     if a.ticket != h:
@@ -286,40 +318,80 @@ def cmd_place(a, cfg):
         T.die(why)
     if not affirmative(a.confirm):
         T.die("--confirm %r is not a clear yes. Placing nothing." % a.confirm)
-    clock = T.market_clock()
+    clock = T.market_clock(cfg=cfg)
     mode = cfg["mode"]
+    typ = o.get("type", "market")
     if mode == "paper":
-        if o.get("type", "market") == "market" and not clock["open"]:
-            T.die("market is closed (%s). Use a limit order or place it after %s." % (clock["status"], clock.get("next_open")))
-        price = T.get_price(o["symbol"], cfg)["price"] if o.get("type", "market") == "market" else o["entry"]
-        res = paper_fill(o, cfg, price)
+        if typ == "market" and not clock["open"]:
+            T.die("%s. Use a limit/stop order or place it after %s." % (clock["status"], clock.get("next_open")))
+        if typ == "market":
+            pos = ledger_open(o, cfg, T.get_price(o["symbol"], cfg)["price"], "paper")
+            res = {"status": "filled", "position": pos["id"], "msg": "paper fill at %s (position %s)" % (
+                T.px(pos["entry"], o["symbol"]), pos["id"])}
+        else:
+            st = T.paper_state(cfg)
+            st.setdefault("pending", []).append(dict(o, placed=now_iso()))
+            T.save_paper(st)
+            res = {"status": "pending", "msg": "paper %s order resting at %s" % (typ, T.px(o["entry"], o["symbol"]))}
+        new_status = "placed"
+    elif mode == "manual":
+        res = {"status": "sent_manual", "msg": manual_steps(o, cfg)}
+        if not clock["open"] and typ == "market":
+            res["msg"] = "note: %s; a market order can only be placed after %s\n" % (clock["status"], clock.get("next_open")) + res["msg"]
+        new_status = "sent_manual"
     elif mode == "mt5":
         res = mt5_place(o, cfg)
+        new_status = "placed"
     else:
-        T.die("unknown mode %r (paper or mt5)" % mode)
-    now = T.ny_now().isoformat(timespec="seconds")
-    ok = res["status"] in ("filled", "pending")
+        T.die("unknown mode %r (paper, manual or mt5)" % mode)
+    ok = res["status"] in ("filled", "pending", "sent_manual")
     if ok:
-        o["status"], o["placed_at"] = "placed", now
+        o["status"], o["placed_at"] = new_status, now_iso()
         T.save_orders(data)
-    log_exec({"at": now, "mode": mode, "order": o, "ticket": h, "user_confirmation": a.confirm, "result": res})
-    T.emit(dict(res, text="%s  %s  ticket %s\n%s" % ("PLACED" if ok else "NOT PLACED", ticket_text(o, cfg), h, res["msg"])),
-           a.json)
+    log_exec({"at": now_iso(), "mode": mode, "order": o, "ticket": h, "user_confirmation": a.confirm, "result": res})
+    head = {"sent_manual": "APPROVED - PLACE IT YOURSELF", "filled": "PLACED", "pending": "PLACED"}.get(res["status"], "NOT PLACED")
+    T.emit(dict(res, text="%s  %s  ticket %s\n%s" % (head, ticket_text(o), h, res["msg"])), a.json)
     return 0 if ok else 1
 
 
+def cmd_filled(a, cfg):
+    """Manual mode: the user placed the order in the app; record the fill."""
+    data = T.load_orders()
+    o = find_order(data, a.order_id)
+    if o.get("status") != "sent_manual":
+        T.die("order %s is not waiting for a manual fill (status %s)" % (o["id"], o.get("status")))
+    o2 = dict(o, volume=a.volume or o["volume"], sl=a.sl if a.sl is not None else o.get("sl"),
+              tp=a.tp if a.tp is not None else o.get("tp"))
+    pos = ledger_open(o2, cfg, a.price, "manual", note="recorded from the MT5 app")
+    o["status"], o["filled_at"] = "placed", now_iso()
+    T.save_orders(data)
+    log_exec({"at": now_iso(), "mode": "manual", "filled": o["id"], "price": a.price, "position": pos["id"]})
+    diff = T.pips(abs(a.price - o["entry"]), o["symbol"]) if o.get("entry") else None
+    T.emit({"position": pos, "text": "recorded position %s: %s %s lots %s at %s%s" % (
+        pos["id"], o2["side"], o2["volume"], pos["symbol"], T.px(a.price, pos["symbol"]),
+        " (%s pips from the planned entry)" % diff if diff else "")}, a.json)
+    return 0
+
+
 def cmd_positions(a, cfg):
-    events = paper_sync(cfg) if cfg["mode"] == "paper" else []
+    events = ledger_sync(cfg) if cfg["mode"] in ("paper", "manual") else []
     acct = T.account_snapshot(cfg)
-    L = ["POSITIONS  %s  balance %.2f equity %.2f %s" % (acct["mode"] + (" " + acct["trade_mode"] if acct["mode"] == "mt5" else ""),
-                                                        acct["balance"], acct["equity"], acct["currency"])]
+    L = ["POSITIONS  %s  balance %.2f equity %.2f %s" % (
+        acct["mode"] + (" " + acct["trade_mode"] if acct["mode"] == "mt5" else ""), acct["balance"], acct["equity"],
+        acct["currency"])]
     L += ["event: " + e for e in events]
     for p in acct["positions"]:
-        L.append("  #%s %s %s %s @%s  now %s  SL %s TP %s  P&L %+.2f" % (
-            p["id"], p["side"], p["volume"], p["symbol"], p["entry"], p.get("price"), p.get("sl"), p.get("tp"), p.get("profit", 0)))
-    if cfg["mode"] == "paper":
-        for o in T.paper_state(cfg).get("pending", []):
-            L.append("  pending %s %s %s %s @%s" % (o.get("id"), o["side"], o["volume"], o["symbol"], o["entry"]))
+        s = p["symbol"]
+        cur = p.get("price") or p["entry"]
+        L.append("  #%s %s %s %s @%s  now %s (%+.0f pips)  SL %s TP %s  P&L %+.2f" % (
+            p["id"], p["side"], p["volume"], s, T.px(p["entry"], s), T.px(cur, s),
+            T.pips((cur - p["entry"]) * (1 if p["side"] == "buy" else -1), s), T.px(p.get("sl"), s), T.px(p.get("tp"), s),
+            p.get("profit", 0)))
+    for o in acct.get("pending", []):
+        L.append("  pending %s %s %s %s @%s" % (o.get("id"), o["side"], o["volume"], o["symbol"], T.px(o["entry"], o["symbol"])))
+    waiting = [o for o in T.load_orders()["orders"] if o.get("status") == "sent_manual"]
+    for o in waiting:
+        L.append("  waiting for you to place in the app: %s  %s" % (o["id"], ticket_text(o)))
     if not acct["positions"]:
         L.append("  no open positions")
     T.emit({"account": acct, "events": events, "text": "\n".join(L)}, a.json)
@@ -338,33 +410,35 @@ def cmd_modify(a, cfg):
         T.die("--confirm is not a clear yes")
     acct = T.account_snapshot(cfg)
     p = _find_position(acct, a.position)
+    s = p["symbol"]
     long = p["side"] == "buy"
-    if a.sl is not None and p.get("sl"):
-        if (long and a.sl < p["sl"]) or (not long and a.sl > p["sl"]):
-            T.die("refusing to loosen the stop (%s -> %s). Stops only move in the trade's favour." % (p["sl"], a.sl))
-    if a.sl is not None and p.get("price") and ((long and a.sl >= p["price"]) or (not long and a.sl <= p["price"])):
-        T.die("stop %s is through the current price %s; close the position instead" % (a.sl, p["price"]))
-    if cfg["mode"] == "paper":
+    if a.sl is not None and p.get("sl") and ((long and a.sl < p["sl"]) or (not long and a.sl > p["sl"])):
+        T.die("refusing to loosen the stop (%s -> %s). Stops only move in the trade's favour." % (
+            T.px(p["sl"], s), T.px(a.sl, s)))
+    cur = p.get("price")
+    if a.sl is not None and cur and ((long and a.sl >= cur) or (not long and a.sl <= cur)):
+        T.die("stop %s is through the current price %s; close the position instead" % (T.px(a.sl, s), T.px(cur, s)))
+    if cfg["mode"] in ("paper", "manual"):
         st = T.paper_state(cfg)
         for q in st["positions"]:
             if str(q["id"]) == str(a.position):
-                if a.sl is not None:
-                    q["sl"] = a.sl
-                if a.tp is not None:
-                    q["tp"] = a.tp
+                q["sl"] = a.sl if a.sl is not None else q.get("sl")
+                q["tp"] = a.tp if a.tp is not None else q.get("tp")
         T.save_paper(st)
-        msg = "paper position %s: SL %s TP %s" % (a.position, a.sl if a.sl is not None else p.get("sl"),
-                                                   a.tp if a.tp is not None else p.get("tp"))
+        msg = "position %s: SL %s TP %s" % (a.position, T.px(a.sl if a.sl is not None else p.get("sl"), s),
+                                           T.px(a.tp if a.tp is not None else p.get("tp"), s))
+        if cfg["mode"] == "manual":
+            msg += "\nIn the MT5 app: Trade (تداول) -> long-press the %s position -> Modify (تعديل) -> set the same SL/TP -> Modify" % s
         ok = True
     else:
         mt5, _ = mt5_guard(cfg)
-        req = {"action": mt5.TRADE_ACTION_SLTP, "position": int(a.position), "symbol": p["symbol"],
+        req = {"action": mt5.TRADE_ACTION_SLTP, "position": int(a.position), "symbol": p.get("broker_symbol", s),
                "sl": float(a.sl if a.sl is not None else (p.get("sl") or 0.0)),
                "tp": float(a.tp if a.tp is not None else (p.get("tp") or 0.0))}
         ok, info = mt5_send(mt5, req)
         msg = str(info)
-    log_exec({"at": T.ny_now().isoformat(timespec="seconds"), "mode": cfg["mode"], "modify": a.position, "sl": a.sl,
-              "tp": a.tp, "user_confirmation": a.confirm, "ok": ok, "result": msg})
+    log_exec({"at": now_iso(), "mode": cfg["mode"], "modify": a.position, "sl": a.sl, "tp": a.tp,
+              "user_confirmation": a.confirm, "ok": ok, "result": msg})
     T.emit({"ok": ok, "text": ("MODIFIED " if ok else "FAILED ") + msg}, a.json)
     return 0 if ok else 1
 
@@ -374,26 +448,30 @@ def cmd_close(a, cfg):
         T.die("--confirm is not a clear yes")
     acct = T.account_snapshot(cfg)
     p = _find_position(acct, a.position)
-    if cfg["mode"] == "paper":
+    s = p["symbol"]
+    if cfg["mode"] in ("paper", "manual"):
+        if cfg["mode"] == "manual" and a.price is None:
+            T.die("manual mode: close the trade in the MT5 app first, then give its close price with --price")
         st = T.paper_state(cfg)
         pos = next(q for q in st["positions"] if str(q["id"]) == str(a.position))
-        px = T.get_price(p["symbol"], cfg)["price"]
-        pnl = paper_close(st, pos, px, "manual close", a.volume)
+        price = a.price if a.price is not None else T.get_price(s, cfg)["price"]
+        pnl = ledger_close(st, pos, price, "manual close" if cfg["mode"] == "manual" else "closed", a.volume)
         T.save_paper(st)
-        ok, msg = True, "paper close at %.4f, P&L %+.2f" % (px, pnl)
+        ok, msg = True, "%s close of %s at %s, P&L %+.2f %s" % (cfg["mode"], s, T.px(price, s), pnl, cfg["currency"])
     else:
         mt5, _ = mt5_guard(cfg)
-        si = mt5.symbol_info(p["symbol"])
-        tk = mt5.symbol_info_tick(p["symbol"])
+        bs = p.get("broker_symbol", s)
+        si = mt5.symbol_info(bs)
+        tk = mt5.symbol_info_tick(bs)
         long = p["side"] == "buy"
-        req = {"action": mt5.TRADE_ACTION_DEAL, "position": int(a.position), "symbol": p["symbol"],
+        req = {"action": mt5.TRADE_ACTION_DEAL, "position": int(a.position), "symbol": bs,
                "volume": float(a.volume or p["volume"]), "type": mt5.ORDER_TYPE_SELL if long else mt5.ORDER_TYPE_BUY,
                "price": tk.bid if long else tk.ask, "deviation": 20, "magic": int(cfg.get("magic", 2126)),
                "comment": "tadawal close", "type_time": mt5.ORDER_TIME_GTC, "type_filling": filling(mt5, si)}
         ok, info = mt5_send(mt5, req)
         msg = str(info)
-    log_exec({"at": T.ny_now().isoformat(timespec="seconds"), "mode": cfg["mode"], "close": a.position,
-              "volume": a.volume, "user_confirmation": a.confirm, "ok": ok, "result": msg})
+    log_exec({"at": now_iso(), "mode": cfg["mode"], "close": a.position, "volume": a.volume, "price": a.price,
+              "user_confirmation": a.confirm, "ok": ok, "result": msg})
     T.emit({"ok": ok, "text": ("CLOSED " if ok else "FAILED ") + msg}, a.json)
     return 0 if ok else 1
 
@@ -402,8 +480,10 @@ def cmd_cancel(a, cfg):
     data = T.load_orders()
     o = find_order(data, a.order_id)
     msg = "order %s cancelled" % o["id"]
-    if o.get("status") == "placed":
-        if cfg["mode"] == "paper":
+    if o.get("status") == "sent_manual":
+        msg += " (if you already placed it in the app, delete it there too)"
+    elif o.get("status") == "placed":
+        if cfg["mode"] in ("paper", "manual"):
             st = T.paper_state(cfg)
             before = len(st.get("pending", []))
             st["pending"] = [x for x in st.get("pending", []) if x.get("id") != o["id"]]
@@ -420,17 +500,19 @@ def cmd_cancel(a, cfg):
                 T.die("MT5 refused the cancel: %s" % info)
     o["status"] = "cancelled"
     T.save_orders(data)
-    log_exec({"at": T.ny_now().isoformat(timespec="seconds"), "mode": cfg["mode"], "cancel": o["id"]})
+    log_exec({"at": now_iso(), "mode": cfg["mode"], "cancel": o["id"]})
     T.emit({"text": msg}, a.json)
     return 0
 
 
 def cmd_account(a, cfg):
     acct = T.account_snapshot(cfg)
+    where = {"mt5": "MT5 account %s on %s (%s)" % (acct.get("account"), acct.get("server"), acct.get("trade_mode")),
+             "manual": "manual: you place orders in the MT5 app, this keeps the record",
+             "paper": "local paper account (simulation)"}.get(acct["mode"], acct["mode"])
     txt = "mode %s | %s | balance %.2f equity %.2f %s | live trading %s" % (
-        cfg["mode"], ("account %s on %s (%s)" % (acct["account"], acct["server"], acct["trade_mode"])) if acct["mode"] == "mt5"
-        else "local paper account", acct["balance"], acct["equity"], acct["currency"],
-        "ALLOWED" if cfg.get("allow_live") else "blocked")
+        cfg["mode"], where, acct["balance"], acct["equity"], acct["currency"],
+        "ALLOWED" if cfg.get("allow_live") else "blocked (MT5 real accounts refused)")
     T.emit(dict(acct, text=txt), a.json)
     return 0
 
@@ -443,7 +525,13 @@ def main(argv=None):
     p = sub.add_parser("place")
     p.add_argument("order_id")
     p.add_argument("--ticket", required=True)
-    p.add_argument("--confirm", required=True, help="the user's own words, e.g. 'yes'")
+    p.add_argument("--confirm", required=True, help="the user's own words, e.g. 'yes' / 'نعم'")
+    f = sub.add_parser("filled", help="manual mode: record the fill from the app")
+    f.add_argument("order_id")
+    f.add_argument("--price", type=float, required=True)
+    f.add_argument("--volume", type=float)
+    f.add_argument("--sl", type=float)
+    f.add_argument("--tp", type=float)
     sub.add_parser("positions")
     m = sub.add_parser("modify")
     m.add_argument("position")
@@ -453,14 +541,15 @@ def main(argv=None):
     c = sub.add_parser("close")
     c.add_argument("position")
     c.add_argument("--volume", type=float)
+    c.add_argument("--price", type=float, help="manual mode: the close price from the app")
     c.add_argument("--confirm", required=True)
     x = sub.add_parser("cancel")
     x.add_argument("order_id")
     sub.add_parser("account")
     a = ap.parse_args(argv)
     cfg = T.load_config()
-    return {"tickets": cmd_tickets, "place": cmd_place, "positions": cmd_positions, "modify": cmd_modify,
-            "close": cmd_close, "cancel": cmd_cancel, "account": cmd_account}[a.cmd](a, cfg)
+    return {"tickets": cmd_tickets, "place": cmd_place, "filled": cmd_filled, "positions": cmd_positions,
+            "modify": cmd_modify, "close": cmd_close, "cancel": cmd_cancel, "account": cmd_account}[a.cmd](a, cfg)
 
 
 if __name__ == "__main__":

@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Time Machine: replay a strategy on past bars and see what would have happened.
 
-    python3 backtest.py AAPL --strategy ema_cross --fast 20 --slow 50
-    python3 backtest.py SPY --strategy rsi_revert --tf D1 --start 2018-01-01
-    python3 backtest.py NVDA --strategy breakout --lookback 55 --sl-atr 2 --trail-atr 3
-    python3 backtest.py AAPL --rules my_rules.json
-    python3 backtest.py AAPL --strategy ema_cross --grid fast=10,20,30 slow=50,100,200
+    python3 backtest.py EURUSD --strategy ema_cross --fast 20 --slow 50
+    python3 backtest.py GBPUSD --strategy rsi_revert --tf H1 --start 2025-01-01
+    python3 backtest.py USDJPY --strategy breakout --lookback 55 --sl-atr 2 --trail-atr 3
+    python3 backtest.py EURUSD --rules my_rules.json --spread-pips 1.2
+    python3 backtest.py EURUSD --strategy ema_cross --grid fast=10,20,30 slow=50,100,200
 
 Signals are read on a bar's close and filled at the NEXT bar's open (no
 look-ahead). If the stop and the target are both inside one bar, the stop is
-assumed to hit first. Slippage and commission are charged on every fill.
+assumed to hit first. The spread (--spread-pips) and any commission are paid on
+every trade. Buy and sell signals are both traded unless --long-only.
 The last 30% of the data is reported separately as out-of-sample (--split).
 
 Rules file format (any of entry_long, exit_long, entry_short, exit_short;
@@ -33,8 +34,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [os.path.join(_HERE, "_lib"), os.path.join(_HERE, "..", "_lib")]
 import tadawal as T  # noqa: E402
 
-BARS_PER_YEAR = {"M1": 252 * 390, "M5": 252 * 78, "M15": 252 * 26, "M30": 252 * 13, "H1": 252 * 7,
-                 "H4": 252 * 2, "D1": 252, "W1": 52}
+BARS_PER_YEAR = {"M1": 260 * 1440, "M5": 260 * 288, "M15": 260 * 96, "M30": 260 * 48, "H1": 260 * 24,
+                 "H4": 260 * 6, "D1": 260, "W1": 52}  # forex trades about 24h x 5 days
 
 STRATEGIES = {
     "ema_cross": lambda p: {
@@ -142,11 +143,17 @@ def all_true(S, conds, i):
 
 
 def run(b, rules, capital=10000.0, risk_pct=1.0, sl_atr=2.0, tp_r=None, trail_atr=None, max_bars=None,
-        slippage_bps=2.0, commission=0.0, allow_short=False, fractional=False, start_ts=None):
+        spread=0.0, slippage_bps=0.0, commission_per_lot=0.0, contract=100000.0, conv=None, leverage=10.0,
+        allow_short=True, fractional=False, start_ts=None):
+    """qty is in units of the base currency (1 lot = `contract` units). conv(price) turns one unit of
+    the quote currency into account currency (1 for XXXUSD, 1/price for USDXXX)."""
     S = Series(b)
     atr = T.atr(b, 14)
     n = len(b)
     slip = slippage_bps / 10000.0
+    half = spread / 2.0
+    conv = conv or (lambda p: 1.0)
+    lot_unit = contract * 0.01
     cash = capital
     pos = None
     pending = None
@@ -156,19 +163,20 @@ def run(b, rules, capital=10000.0, risk_pct=1.0, sl_atr=2.0, tp_r=None, trail_at
         first = max(1, next((i for i, t in enumerate(b.t) if t >= start_ts), n))
 
     def fill(px, side, entering):
-        worse = 1 + slip if (side == "buy") == entering else 1 - slip
-        return px * worse
+        adj = px * slip + half
+        return px + adj if (side == "buy") == entering else px - adj
 
     def close(i, px, why):
         nonlocal cash, pos
         side = pos["side"]
         exit_px = fill(px, side, False)
         sgn = 1 if side == "buy" else -1
-        pnl = sgn * (exit_px - pos["entry"]) * pos["qty"] - commission * pos["qty"] * 2
+        pnl = sgn * (exit_px - pos["entry"]) * pos["qty"] * conv(exit_px) - commission_per_lot * pos["qty"] / contract * 2
         cash += pnl
         R = pos["risk"]
-        trades.append({"side": side, "entry_date": b.date(pos["i"]), "entry": round(pos["entry"], 4),
-                       "exit_date": b.date(i), "exit": round(exit_px, 4), "qty": pos["qty"],
+        trades.append({"side": side, "entry_date": b.date(pos["i"]), "entry": T.r(pos["entry"]),
+                       "exit_date": b.date(i), "exit": T.r(exit_px), "lots": round(pos["qty"] / contract, 2),
+                       "pips": T.pips(sgn * (exit_px - pos["entry"]), b.symbol),
                        "pnl": round(pnl, 2), "r": round(pnl / R, 2) if R else None,
                        "bars": i - pos["i"], "why": why})
         pos = None
@@ -183,15 +191,15 @@ def run(b, rules, capital=10000.0, risk_pct=1.0, sl_atr=2.0, tp_r=None, trail_at
             if sl_atr and a:
                 stop = entry - sl_atr * a if side == "buy" else entry + sl_atr * a
             equity = cash
+            cv = conv(entry)
             if stop is not None:
-                per = abs(entry - stop)
-                qty = equity * risk_pct / 100.0 / per
+                qty = equity * risk_pct / 100.0 / (abs(entry - stop) * cv)
             else:
-                qty = equity / entry
-            qty = min(qty, equity / entry)
-            qty = qty if fractional else math.floor(qty)
+                qty = equity / (entry * cv)
+            qty = min(qty, equity * leverage / (entry * cv))
+            qty = qty if fractional else math.floor(qty / lot_unit) * lot_unit
             if qty > 0:
-                risk = abs(entry - stop) * qty if stop is not None else entry * qty * 0.1
+                risk = abs(entry - stop) * qty * cv if stop is not None else entry * qty * cv * 0.01
                 tp = None
                 if tp_r and stop is not None:
                     tp = entry + tp_r * abs(entry - stop) * (1 if side == "buy" else -1)
@@ -237,7 +245,7 @@ def run(b, rules, capital=10000.0, risk_pct=1.0, sl_atr=2.0, tp_r=None, trail_at
         mark = cash
         if pos:
             sgn = 1 if pos["side"] == "buy" else -1
-            mark += sgn * (b.c[i] - pos["entry"]) * pos["qty"]
+            mark += sgn * (b.c[i] - pos["entry"]) * pos["qty"] * conv(b.c[i])
         curve.append((b.t[i], mark))
     if pos:
         close(n - 1, b.c[-1], "still open at end")
@@ -308,6 +316,20 @@ def _fmt(ts, tf):
     return d.strftime("%Y-%m-%d") if tf in ("D1", "W1") else d.strftime("%Y-%m-%d %H:%M")
 
 
+def conv_for(symbol):
+    """Quote currency -> USD per unit, from the bar's own price where possible."""
+    base, quote = T.split_pair(symbol)
+    if quote == "USD" or not base:
+        return lambda p: 1.0
+    if base == "USD":
+        return lambda p: 1.0 / p
+    try:
+        k = T.conv_rate(quote, "USD")
+    except SystemExit:
+        k = 1.0
+    return lambda p: k
+
+
 def backtest(b, rules, name, opts):
     start_ts = None
     if opts.get("start"):
@@ -316,12 +338,18 @@ def backtest(b, rules, name, opts):
         end_ts = int(dt.datetime.fromisoformat(opts["end"]).replace(tzinfo=dt.timezone.utc).timestamp())
         b = b.slice(0, next((i for i, t in enumerate(b.t) if t > end_ts), len(b)))
     kw = {k: opts[k] for k in ("capital", "risk_pct", "sl_atr", "tp_r", "trail_atr", "max_bars", "slippage_bps",
-                               "commission", "allow_short", "fractional") if k in opts}
+                               "commission_per_lot", "allow_short", "fractional", "leverage", "contract") if k in opts}
+    T.set_symbol(b.symbol)
+    kw["spread"] = opts.get("spread_pips", 0.0) * T.pip_size(b.symbol)
+    kw["conv"] = opts.get("conv") or conv_for(b.symbol)
     trades, curve = run(b, rules, start_ts=start_ts, **kw)
     first = len(b) - len(curve)
     m = metrics(trades, curve, b.tf, opts.get("capital", 10000.0))
+    base, quote = T.split_pair(b.symbol)
+    note = None if quote == "USD" or base == "USD" or not base else "today's %sUSD rate (approximation)" % quote
     out = {"symbol": b.symbol, "tf": b.tf, "source": b.source, "strategy": name, "rules": rules,
-           "settings": kw, "from": b.date(first) if curve else None, "to": b.date(len(b) - 1),
+           "spread_pips": opts.get("spread_pips", 0.0), "conv_note": note,
+           "settings": {k: v for k, v in kw.items() if k != "conv"}, "from": b.date(first) if curve else None, "to": b.date(len(b) - 1),
            "metrics": m, "buy_hold": buy_hold(b, first, opts.get("capital", 10000.0)),
            "walk_forward": split_metrics(trades, curve, b.tf, opts.get("split", 0.7)), "trades": trades}
     return out
@@ -331,9 +359,10 @@ def render(o, show_trades=10):
     m, bh = o["metrics"], o["buy_hold"]
     s = o["settings"]
     L = ["TIME MACHINE  %s %s  %s  (%s .. %s, %s)" % (o["symbol"], o["tf"], o["strategy"], o["from"], o["to"], o["source"]),
-         "capital %s, risk %s%%/trade, stop %s ATR, target %s, trail %s, slippage %s bps, commission %s/share" % (
+         "capital %s, risk %s%%/trade, stop %s ATR, target %s, trail %s, slippage %s bps, commission %s/lot/side" % (
              s.get("capital"), s.get("risk_pct"), s.get("sl_atr") or "none", "%sR" % s["tp_r"] if s.get("tp_r") else "none",
-             "%s ATR" % s["trail_atr"] if s.get("trail_atr") else "none", s.get("slippage_bps"), s.get("commission")),
+             "%s ATR" % s["trail_atr"] if s.get("trail_atr") else "none", s.get("slippage_bps"), s.get("commission_per_lot")),
+         "spread %s pips per round trip%s" % (o.get("spread_pips"), " | P&L converted at " + o["conv_note"] if o.get("conv_note") else ""),
          "",
          "strategy   return %6s%%  CAGR %6s%%  max DD %6s%%  Sharpe %s" % (
              m.get("return_pct"), m.get("cagr_pct"), m.get("max_drawdown_pct"), m.get("sharpe")),
@@ -360,14 +389,15 @@ def render(o, show_trades=10):
         L.append("last %d trades:" % min(show_trades, len(o["trades"])))
         for t in o["trades"][-show_trades:]:
             L.append("  %s %s %s @%s -> %s @%s  %+.2f (%sR) %s" % (
-                t["side"], t["qty"], t["entry_date"], t["entry"], t["exit_date"], t["exit"], t["pnl"], t["r"], t["why"]))
+                t["side"], t["lots"], t["entry_date"], T.px(t["entry"], o["symbol"]), t["exit_date"],
+                T.px(t["exit"], o["symbol"]), t["pnl"], t["r"], "%+.0f pips %s" % (t["pips"], t["why"])))
     return "\n".join(L)
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("symbol")
-    T.add_data_args(ap, "D1", 5000)
+    T.add_data_args(ap, "H1", 20000)
     ap.add_argument("--strategy", choices=sorted(STRATEGIES), default="ema_cross")
     ap.add_argument("--rules", help="JSON rules file (overrides --strategy)")
     ap.add_argument("--fast", type=int, default=20)
@@ -383,9 +413,11 @@ def main(argv=None):
     ap.add_argument("--tp-r", type=float, help="take profit at this many R")
     ap.add_argument("--trail-atr", type=float, help="ATR trailing stop")
     ap.add_argument("--max-bars", type=int, help="exit after this many bars")
-    ap.add_argument("--slippage-bps", type=float, default=2.0)
-    ap.add_argument("--commission", type=float, default=0.0, help="per share per side")
-    ap.add_argument("--allow-short", action="store_true")
+    ap.add_argument("--spread-pips", type=float, default=1.0, help="typical spread, paid on every round trip")
+    ap.add_argument("--slippage-bps", type=float, default=0.0)
+    ap.add_argument("--commission", type=float, default=0.0, help="account currency per lot per side (ECN accounts)")
+    ap.add_argument("--leverage", type=float, default=10.0, help="max notional / equity per trade")
+    ap.add_argument("--long-only", action="store_true", help="only buy signals (default: buy and sell)")
     ap.add_argument("--fractional", action="store_true")
     ap.add_argument("--split", type=float, default=0.7)
     ap.add_argument("--grid", nargs="*", help="e.g. fast=10,20 slow=50,100: test every combination")
@@ -394,7 +426,8 @@ def main(argv=None):
     b = T.get_bars(a.symbol, a.tf, a.count, a.source, a.csv)
     opts = {"capital": a.capital, "risk_pct": a.risk_pct, "sl_atr": a.sl_atr or None, "tp_r": a.tp_r,
             "trail_atr": a.trail_atr, "max_bars": a.max_bars, "slippage_bps": a.slippage_bps,
-            "commission": a.commission, "allow_short": a.allow_short, "fractional": a.fractional,
+            "commission_per_lot": a.commission, "allow_short": not a.long_only, "fractional": a.fractional,
+            "spread_pips": a.spread_pips, "leverage": a.leverage,
             "start": a.start, "end": a.end, "split": a.split}
     params = {"fast": a.fast, "slow": a.slow, "rsi_low": a.rsi_low, "rsi_high": a.rsi_high, "lookback": a.lookback}
     if a.grid:

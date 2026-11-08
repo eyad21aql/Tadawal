@@ -1,8 +1,8 @@
-"""Shared helpers for the Tadawal skill pack (standard library only).
+"""Shared helpers for the Tadawal forex skill pack (standard library only).
 
-Data sources, in order of preference when source="auto":
-  1. MetaTrader 5 terminal (Windows, `pip install MetaTrader5`, terminal running)
-  2. Yahoo Finance chart JSON (free, delayed, unofficial)
+Price data, in order of preference when data_source="auto":
+  1. MetaTrader 5 desktop terminal (Windows, `pip install MetaTrader5`, terminal running)
+  2. Yahoo Finance chart JSON for currency pairs (EURUSD=X; free, delayed, no volume)
 A CSV file (MT5 "Export bars" format or plain date,open,high,low,close,volume)
 can always be passed with --csv.
 
@@ -16,6 +16,7 @@ import io
 import json
 import math
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -24,29 +25,36 @@ import urllib.request
 try:
     from zoneinfo import ZoneInfo
     NY = ZoneInfo("America/New_York")
-except Exception:  # pragma: no cover - very old Python / missing tzdata
-    NY = None
+    UTC = dt.timezone.utc
+except Exception:  # pragma: no cover
+    ZoneInfo, NY, UTC = None, None, dt.timezone.utc
 
 # --------------------------------------------------------------------------
 # files and config
 # --------------------------------------------------------------------------
 
 DEFAULT_CONFIG = {
-    "mode": "paper",              # paper = simulate fills locally; mt5 = send to MetaTrader 5
+    "mode": "paper",              # paper = simulated ledger; manual = you place orders in the MT5 app;
+                                  # mt5 = orders sent to the MetaTrader 5 desktop terminal
     "allow_live": False,          # MT5 REAL accounts are refused unless this is true
     "data_source": "auto",        # auto | mt5 | yahoo
-    "symbol_suffix": "",          # e.g. ".US" or ".NAS" if your broker renames US stocks
-    "symbol_map": {},             # {"AAPL": "#AAPL"} explicit overrides
-    "account_balance": 10000.0,   # used when MT5 is not connected
-    "currency": "USD",
+    "timezone": "Asia/Riyadh",    # times are shown in this zone
+    "symbol_suffix": "",          # e.g. "m" or ".pro" if your broker renames pairs (EURUSDm)
+    "symbol_map": {},             # {"XAUUSD": "GOLD"} explicit overrides
+    "account_balance": 10000.0,   # paper/manual balance (MT5 reads the real one)
+    "currency": "USD",            # account currency
+    "contract_size": 100000,      # 1 standard lot (paper/manual)
+    "leverage": 100,              # paper/manual margin estimate
     "risk_per_trade_pct": 1.0,    # max % of balance lost if the stop is hit
+    "max_total_risk_pct": 5.0,    # all open stops together
     "max_open_positions": 5,
     "max_daily_loss_pct": 3.0,    # stop trading for the day after this realized loss
-    "max_position_pct": 25.0,     # max notional of one position as % of balance
+    "max_leverage": 10.0,         # total notional / balance after the new order
+    "max_same_currency": 2,       # warn when more trades push the same currency the same way
+    "max_spread_pips": 3.0,       # MT5: refuse to send when the spread is wider
     "min_rr": 1.5,                # minimum reward:risk when a target is set
     "blocked_symbols": [],
-    "allow_short": False,
-    "sec_user_agent": "",         # "Your Name you@example.com" (SEC requires it)
+    "allow_short": True,          # selling a pair is normal in forex
     "mt5": {"path": None, "login": None, "server": None},  # password: env MT5_PASSWORD
     "magic": 2126,
 }
@@ -100,7 +108,6 @@ def die(msg, code=2):
 
 
 def emit(obj, as_json):
-    """Print JSON when asked, otherwise the 'text' field (or pretty JSON)."""
     if as_json:
         print(json.dumps(obj, indent=2, ensure_ascii=False, default=str))
     elif isinstance(obj, dict) and "text" in obj:
@@ -116,9 +123,8 @@ def order_hash(order):
     for k in ("volume", "entry", "sl", "tp"):
         if norm[k] is not None:
             norm[k] = round(float(norm[k]), 6)
-    norm["symbol"] = str(norm["symbol"] or "").upper()
-    s = json.dumps(norm, sort_keys=True)
-    return hashlib.sha256(s.encode()).hexdigest()[:12]
+    norm["symbol"] = norm_symbol(norm["symbol"] or "")
+    return hashlib.sha256(json.dumps(norm, sort_keys=True).encode()).hexdigest()[:12]
 
 
 # --------------------------------------------------------------------------
@@ -126,8 +132,7 @@ def order_hash(order):
 # --------------------------------------------------------------------------
 
 def http_get(url, ua=None, timeout=30, retries=3, accept=None):
-    headers = {"User-Agent": ua or "Mozilla/5.0 (Tadawal skill pack)",
-               "Accept-Encoding": "gzip"}
+    headers = {"User-Agent": ua or "Mozilla/5.0 (Tadawal skill pack)", "Accept-Encoding": "gzip"}
     if accept:
         headers["Accept"] = accept
     last = None
@@ -151,74 +156,179 @@ def http_get(url, ua=None, timeout=30, retries=3, accept=None):
     raise last
 
 
-def sec_user_agent(cli=None):
-    ua = (cli or os.environ.get("SEC_USER_AGENT") or load_config().get("sec_user_agent") or "").strip()
-    if not ua or "@" not in ua:
-        die('SEC requires a contact: set SEC_USER_AGENT="Your Name you@example.com" '
-            'or "sec_user_agent" in trader/config.json')
-    return ua
+# --------------------------------------------------------------------------
+# symbols, pips, prices
+# --------------------------------------------------------------------------
+
+CCYS = {"USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD", "SEK", "NOK", "DKK", "SGD", "HKD", "MXN",
+        "ZAR", "TRY", "PLN", "CNH", "SAR", "AED", "XAU", "XAG"}
+DIGITS = 5  # display precision of the symbol being worked on (set by get_bars / set_symbol)
+
+
+def norm_symbol(s):
+    s = str(s or "").upper().replace("/", "").replace("_", "").replace("-", "").strip()
+    return s[:-2] if s.endswith("=X") else s
+
+
+def split_pair(symbol):
+    s = norm_symbol(symbol)
+    m = re.match(r"^([A-Z]{3})([A-Z]{3})", s)
+    if m and m.group(1) in CCYS and m.group(2) in CCYS:
+        return m.group(1), m.group(2)
+    return None, None
+
+
+def pip_size(symbol):
+    base, quote = split_pair(symbol)
+    if base in ("XAU",):
+        return 0.1
+    if base in ("XAG",):
+        return 0.01
+    return 0.01 if quote == "JPY" else 0.0001
+
+
+def digits_for(symbol):
+    base, quote = split_pair(symbol)
+    if base == "XAU":
+        return 2
+    if base == "XAG":
+        return 3
+    return 3 if quote == "JPY" else 5
+
+
+def set_symbol(symbol):
+    global DIGITS
+    DIGITS = digits_for(symbol)
+
+
+def pips(diff, symbol):
+    return round(diff / pip_size(symbol), 1)
+
+
+def r(x, n=None):
+    return None if x is None else round(float(x), DIGITS if n is None else n)
+
+
+def px(x, symbol=None):
+    """Price as text with the symbol's digits."""
+    if x is None:
+        return "-"
+    d = digits_for(symbol) if symbol else DIGITS
+    return "%.*f" % (d, float(x))
+
+
+def yahoo_symbol(symbol):
+    s = norm_symbol(symbol)
+    base, quote = split_pair(s)
+    if base == "XAU":
+        return "GC=F"
+    if base == "XAG":
+        return "SI=F"
+    return s + "=X" if base else s
+
+
+def broker_symbol(symbol, cfg):
+    s = norm_symbol(symbol)
+    return cfg.get("symbol_map", {}).get(s) or (s + (cfg.get("symbol_suffix") or ""))
 
 
 # --------------------------------------------------------------------------
-# NYSE calendar
+# forex clock and sessions
 # --------------------------------------------------------------------------
 
-NYSE_HOLIDAYS = {
-    # 2026
-    "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",
-    "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25",
-    # 2027
-    "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31",
-    "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24",
-}
-NYSE_EARLY_CLOSE = {"2026-11-27", "2026-12-24", "2027-11-26"}  # 1:00 p.m. close
-CALENDAR_YEARS = (2026, 2027)
+SESSIONS = [  # name, zone, local open hour, local close hour
+    ("Sydney", "Australia/Sydney", 7, 16),
+    ("Tokyo", "Asia/Tokyo", 9, 18),
+    ("London", "Europe/London", 8, 17),
+    ("New York", "America/New_York", 8, 17),
+]
+SESSION_CCY = {"Sydney": {"AUD", "NZD"}, "Tokyo": {"JPY", "AUD", "NZD"}, "London": {"EUR", "GBP", "CHF"},
+               "New York": {"USD", "CAD"}}
+
+
+def user_tz(cfg=None):
+    name = (cfg or {}).get("timezone") or DEFAULT_CONFIG["timezone"]
+    try:
+        return ZoneInfo(name) if ZoneInfo else UTC
+    except Exception:
+        return UTC
 
 
 def ny_now():
-    return dt.datetime.now(NY) if NY else dt.datetime.utcnow() - dt.timedelta(hours=5)
+    return dt.datetime.now(NY) if NY else dt.datetime.now(UTC)
 
 
-def session(day):
-    """(open, close) datetimes in New York for a date, or None if closed."""
-    if day.weekday() >= 5 or day.isoformat() in NYSE_HOLIDAYS:
-        return None
-    o = dt.datetime.combine(day, dt.time(9, 30), NY)
-    c = dt.datetime.combine(day, dt.time(13 if day.isoformat() in NYSE_EARLY_CLOSE else 16, 0), NY)
-    return o, c
+def _fx_closed(t_ny):
+    wd, hm = t_ny.weekday(), t_ny.hour * 60 + t_ny.minute
+    if (wd == 4 and hm >= 17 * 60) or wd == 5 or (wd == 6 and hm < 17 * 60):
+        return "weekend"
+    if t_ny.strftime("%m-%d") in ("12-25", "01-01"):
+        return "holiday"
+    return None
 
 
-def market_clock(now=None):
-    now = now or ny_now()
-    if now.tzinfo is None and NY:
-        now = now.replace(tzinfo=NY)
-    now = now.astimezone(NY) if NY else now
-    today = now.date()
-    s = session(today)
-    out = {"now_ny": now.strftime("%Y-%m-%d %H:%M %a"), "open": False}
-    if today.year not in CALENDAR_YEARS:
-        out["warning"] = "holiday calendar only covers %s; weekends still respected" % (CALENDAR_YEARS,)
-    if s and s[0] <= now < s[1]:
-        out["open"] = True
-        out["closes_at"] = s[1].strftime("%Y-%m-%d %H:%M")
-        out["minutes_since_open"] = int((now - s[0]).total_seconds() // 60)
-        out["minutes_to_close"] = int((s[1] - now).total_seconds() // 60)
-        out["early_close"] = today.isoformat() in NYSE_EARLY_CLOSE
-        out["status"] = "NYSE open"
-        return out
-    if s and now < s[0]:
-        nxt = s[0]
-        why = "pre-market"
-    else:
-        why = "after hours" if s else ("weekend" if today.weekday() >= 5 else "holiday")
-        d = today + dt.timedelta(days=1)
-        while session(d) is None:
-            d += dt.timedelta(days=1)
-        nxt = session(d)[0]
-    out["status"] = "NYSE closed (%s)" % why
-    out["next_open"] = nxt.strftime("%Y-%m-%d %H:%M %a")
-    out["minutes_to_open"] = int((nxt - now).total_seconds() // 60)
+def active_sessions(now):
+    out = []
+    for name, zone, o, c in SESSIONS:
+        loc = now.astimezone(ZoneInfo(zone)) if ZoneInfo else now
+        if loc.weekday() < 5 and o <= loc.hour < c:
+            out.append(name)
     return out
+
+
+def market_clock(now=None, cfg=None):
+    """Forex is open from Sunday 17:00 New York to Friday 17:00 New York."""
+    now = now or ny_now()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=NY)
+    t_ny = now.astimezone(NY)
+    tz = user_tz(cfg)
+    loc = lambda d: d.astimezone(tz).strftime("%a %Y-%m-%d %H:%M")  # noqa: E731
+    out = {"now_ny": t_ny.strftime("%Y-%m-%d %H:%M %a"), "now_local": loc(now), "open": False, "warnings": []}
+    why = _fx_closed(t_ny)
+    if why:
+        nxt = t_ny.replace(minute=0, second=0, microsecond=0)
+        while _fx_closed(nxt) or nxt <= t_ny:
+            nxt += dt.timedelta(hours=1)
+        out["status"] = "forex closed (%s)" % why
+        out["next_open"] = loc(nxt)
+        out["minutes_to_open"] = int((nxt - t_ny).total_seconds() // 60)
+        out["sessions"] = []
+        return out
+    fri = t_ny + dt.timedelta(days=(4 - t_ny.weekday()) % 7)
+    close = fri.replace(hour=17, minute=0, second=0, microsecond=0)
+    if close <= t_ny:
+        close += dt.timedelta(days=7)
+    ses = active_sessions(now)
+    out.update(open=True, sessions=ses, closes_at=loc(close),
+               minutes_to_close=int((close - t_ny).total_seconds() // 60))
+    hm = t_ny.hour * 60 + t_ny.minute
+    if 16 * 60 + 50 <= hm < 17 * 60 + 20:
+        out["warnings"].append("daily rollover (17:00 New York): spreads are wide, avoid new entries")
+    if out["minutes_to_close"] < 180:
+        out["warnings"].append("weekly close in %d minutes: weekend gap risk for open trades" % out["minutes_to_close"])
+    if "London" in ses and "New York" in ses:
+        liq = "London/New York overlap: highest liquidity"
+    elif ses == ["Sydney"] or not ses:
+        liq = "thin liquidity (only Sydney or between sessions)"
+    else:
+        liq = "/".join(ses) + " session"
+    out["liquidity"] = liq
+    out["status"] = "forex open: " + liq
+    return out
+
+
+def session_note(symbol, clock):
+    """Is the pair's own currency in an active session?"""
+    base, quote = split_pair(symbol)
+    if not clock.get("open") or not base:
+        return None
+    hot = set()
+    for s in clock.get("sessions", []):
+        hot |= SESSION_CCY.get(s, set())
+    if base in hot or quote in hot:
+        return None
+    return "%s%s is quiet now (its currencies' sessions are closed): smaller moves, false breakouts" % (base, quote)
 
 
 # --------------------------------------------------------------------------
@@ -226,8 +336,7 @@ def market_clock(now=None):
 # --------------------------------------------------------------------------
 
 TIMEFRAMES = ("M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1")
-TF_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800, "H1": 3600,
-              "H4": 14400, "D1": 86400, "W1": 604800}
+TF_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800, "H1": 3600, "H4": 14400, "D1": 86400, "W1": 604800}
 
 
 class Bars:
@@ -245,17 +354,13 @@ class Bars:
                     self.l[start:end], self.c[start:end], self.v[start:end], self.source)
 
     def date(self, i, fmt=None):
-        d = dt.datetime.fromtimestamp(self.t[i], dt.timezone.utc)
-        if NY:
-            d = d.astimezone(NY)
+        d = dt.datetime.fromtimestamp(self.t[i], UTC)
         if fmt:
             return d.strftime(fmt)
         return d.strftime("%Y-%m-%d") if self.tf in ("D1", "W1") else d.strftime("%Y-%m-%d %H:%M")
 
-
-def broker_symbol(symbol, cfg):
-    s = symbol.upper()
-    return cfg.get("symbol_map", {}).get(s) or (s + (cfg.get("symbol_suffix") or ""))
+    def has_volume(self):
+        return any(v > 0 for v in self.v[-50:])
 
 
 def _mt5_module():
@@ -274,16 +379,13 @@ def mt5_connect(cfg=None, required=False):
     global _MT5_READY
     if _MT5_READY is not None:
         if not _MT5_READY and required:
-            die("MetaTrader 5 is not connected. On Windows: pip install MetaTrader5, keep the MT5 terminal "
-                "open and logged in, or set \"mode\": \"paper\" in trader/config.json.")
+            die("MetaTrader 5 desktop is not connected. It needs Windows, `pip install MetaTrader5`, and the MT5 "
+                "terminal open and logged in. The phone app cannot be connected: use \"mode\": \"manual\".")
         return _MT5_READY or None
     mt5 = _mt5_module()
     if mt5 is None:
         _MT5_READY = False
-        if required:
-            die("MetaTrader5 Python package not available. On Windows: pip install MetaTrader5, "
-                "and keep the MT5 terminal open and logged in.")
-        return None
+        return mt5_connect(cfg, required)
     cfg = cfg or load_config()
     m = cfg.get("mt5") or {}
     kw = {}
@@ -313,15 +415,14 @@ def _bars_mt5(symbol, tf, count, cfg):
     if rates is None or len(rates) == 0:
         return None
     t, o, h, l, c, v = [], [], [], [], [], []
-    for r in rates:
-        t.append(int(r["time"]))
-        o.append(float(r["open"]))
-        h.append(float(r["high"]))
-        l.append(float(r["low"]))
-        c.append(float(r["close"]))
-        rv = float(r["real_volume"]) if "real_volume" in r.dtype.names else 0.0
-        v.append(rv or float(r["tick_volume"]))
-    return Bars(symbol.upper(), tf, t, o, h, l, c, v, "mt5:" + sym)
+    for x in rates:
+        t.append(int(x["time"]))
+        o.append(float(x["open"]))
+        h.append(float(x["high"]))
+        l.append(float(x["low"]))
+        c.append(float(x["close"]))
+        v.append(float(x["tick_volume"]))
+    return Bars(norm_symbol(symbol), tf, t, o, h, l, c, v, "mt5:" + sym)
 
 
 YAHOO_TF = {"M1": ("1m", "7d"), "M5": ("5m", "60d"), "M15": ("15m", "60d"), "M30": ("30m", "60d"),
@@ -332,36 +433,28 @@ def parse_yahoo_chart(raw, symbol, tf):
     js = json.loads(raw)
     res = (js.get("chart") or {}).get("result")
     if not res:
-        err = (js.get("chart") or {}).get("error")
-        raise ValueError("Yahoo returned no data for %s: %s" % (symbol, err))
-    r = res[0]
-    q = r["indicators"]["quote"][0]
+        raise ValueError("Yahoo returned no data for %s: %s" % (symbol, (js.get("chart") or {}).get("error")))
+    q = res[0]["indicators"]["quote"][0]
     t, o, h, l, c, v = [], [], [], [], [], []
-    for i, ts in enumerate(r.get("timestamp") or []):
+    for i, ts in enumerate(res[0].get("timestamp") or []):
         vals = [q["open"][i], q["high"][i], q["low"][i], q["close"][i]]
         if any(x is None for x in vals):
             continue
         t.append(int(ts))
         o.append(float(vals[0]))
-        h.append(float(vals[1]))
-        l.append(float(vals[2]))
+        h.append(max(float(x) for x in vals))
+        l.append(min(float(x) for x in vals))
         c.append(float(vals[3]))
-        v.append(float(q["volume"][i] or 0))
-    return Bars(symbol.upper(), tf, t, o, h, l, c, v, "yahoo")
+        v.append(float((q.get("volume") or [0] * (i + 1))[i] or 0))
+    return Bars(norm_symbol(symbol), tf, t, o, h, l, c, v, "yahoo")
 
 
 def resample(b, tf):
-    """Group bars into fixed buckets of TF_SECONDS[tf] (aligned to NY 9:30 for H4)."""
     step = TF_SECONDS[tf]
     out = Bars(b.symbol, tf, [], [], [], [], [], [], b.source)
     key_prev = None
     for i in range(len(b)):
-        if tf == "H4":
-            d = dt.datetime.fromtimestamp(b.t[i], NY) if NY else dt.datetime.utcfromtimestamp(b.t[i])
-            mins = d.hour * 60 + d.minute - 570
-            key = (d.date(), mins // 240)
-        else:
-            key = b.t[i] // step
+        key = b.t[i] // step
         if key != key_prev:
             out.t.append(b.t[i]); out.o.append(b.o[i]); out.h.append(b.h[i])
             out.l.append(b.l[i]); out.c.append(b.c[i]); out.v.append(b.v[i])
@@ -374,8 +467,8 @@ def resample(b, tf):
 
 def _bars_yahoo(symbol, tf, count):
     interval, rng = YAHOO_TF[tf]
-    url = ("https://query1.finance.yahoo.com/v8/finance/chart/%s?range=%s&interval=%s"
-           "&includePrePost=false&events=div%%2Csplit" % (symbol.upper(), rng, interval))
+    url = "https://query1.finance.yahoo.com/v8/finance/chart/%s?range=%s&interval=%s" % (
+        urllib.request.quote(yahoo_symbol(symbol)), rng, interval)
     b = parse_yahoo_chart(http_get(url), symbol, tf)
     if tf == "H4":
         b = resample(b, "H4")
@@ -386,9 +479,10 @@ def load_csv(path, symbol="CSV", tf="D1"):
     """Read MT5-exported bars (<DATE>\t<TIME>\t<OPEN>...) or a plain OHLCV CSV."""
     with open(path, encoding="utf-8-sig") as f:
         text = f.read()
-    delim = "\t" if text.count("\t") > text.count(",") else ("," if "," in text.splitlines()[0] else ";")
+    first = text.splitlines()[0]
+    delim = "\t" if "\t" in first else ("," if "," in first else ";")
     rows = list(csv.reader(io.StringIO(text), delimiter=delim))
-    head = [h.strip().strip("<>").lower() for h in rows[0]]
+    head = [x.strip().strip("<>").lower() for x in rows[0]]
 
     def col(*names):
         for n in names:
@@ -398,26 +492,26 @@ def load_csv(path, symbol="CSV", tf="D1"):
 
     ci = {k: col(*names) for k, names in {
         "date": ("date", "datetime", "time", "timestamp"), "time": ("time",),
-        "o": ("open",), "h": ("high",), "l": ("low",), "c": ("close", "adj close"),
-        "v": ("volume", "vol", "tickvol", "tick_volume", "real_volume")}.items()}
+        "o": ("open",), "h": ("high",), "l": ("low",), "c": ("close",),
+        "v": ("tickvol", "tick_volume", "volume", "vol", "real_volume")}.items()}
     if None in (ci["date"], ci["o"], ci["h"], ci["l"], ci["c"]):
         die("CSV needs date/open/high/low/close columns; got %s" % head)
     if ci["time"] == ci["date"]:
         ci["time"] = None
     t, o, h, l, c, v = [], [], [], [], [], []
-    for r in rows[1:]:
-        if not r or not r[ci["date"]].strip():
+    for row in rows[1:]:
+        if not row or not row[ci["date"]].strip():
             continue
-        s = r[ci["date"]].strip()
+        s = row[ci["date"]].strip()
         if ci["time"] is not None:
-            s += " " + r[ci["time"]].strip()
+            s += " " + row[ci["time"]].strip()
         t.append(_parse_ts(s))
-        o.append(float(r[ci["o"]])); h.append(float(r[ci["h"]]))
-        l.append(float(r[ci["l"]])); c.append(float(r[ci["c"]]))
-        v.append(float(r[ci["v"]]) if ci["v"] is not None and r[ci["v"]] else 0.0)
+        o.append(float(row[ci["o"]])); h.append(float(row[ci["h"]]))
+        l.append(float(row[ci["l"]])); c.append(float(row[ci["c"]]))
+        v.append(float(row[ci["v"]]) if ci["v"] is not None and row[ci["v"]] else 0.0)
     order = sorted(range(len(t)), key=lambda i: t[i])
     pick = lambda a: [a[i] for i in order]  # noqa: E731
-    return Bars(symbol.upper(), tf, pick(t), pick(o), pick(h), pick(l), pick(c), pick(v), "csv:" + path)
+    return Bars(norm_symbol(symbol), tf, pick(t), pick(o), pick(h), pick(l), pick(c), pick(v), "csv:" + path)
 
 
 def _parse_ts(s):
@@ -428,8 +522,7 @@ def _parse_ts(s):
     for fmt in ("%Y.%m.%d %H:%M:%S", "%Y.%m.%d %H:%M", "%Y.%m.%d", "%Y-%m-%d %H:%M:%S",
                 "%Y-%m-%d %H:%M", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%m/%d/%Y", "%m/%d/%Y %H:%M"):
         try:
-            d = dt.datetime.strptime(s, fmt)
-            return int(d.replace(tzinfo=dt.timezone.utc).timestamp())
+            return int(dt.datetime.strptime(s, fmt).replace(tzinfo=UTC).timestamp())
         except ValueError:
             continue
     die("cannot parse date %r in CSV" % s)
@@ -439,6 +532,7 @@ def get_bars(symbol, tf="D1", count=500, source=None, csv_path=None, cfg=None):
     tf = tf.upper()
     if tf not in TIMEFRAMES:
         die("timeframe must be one of %s" % (TIMEFRAMES,))
+    set_symbol(symbol)
     if csv_path:
         b = load_csv(csv_path, symbol, tf)
         return b.slice(-count) if count else b
@@ -454,39 +548,56 @@ def get_bars(symbol, tf="D1", count=500, source=None, csv_path=None, cfg=None):
     try:
         return _bars_yahoo(symbol, tf, count)
     except Exception as e:
-        die("could not load %s %s from Yahoo (%s). Pass --csv with exported bars instead." % (symbol, tf, e))
+        die("could not load %s %s from Yahoo (%s). Export bars from MT5 and pass --csv instead." % (symbol, tf, e))
+
+
+_PRICE_OVERRIDE = {}  # {"EURUSD": 1.08}: prices read from a screenshot, offline use, tests
+
+
+def set_prices(text):
+    """'EURUSD=1.0850,USDJPY=156.39' -> used instead of fetching (e.g. prices read from the phone app)."""
+    for part in re.split(r"[,\s]+", text or ""):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            _PRICE_OVERRIDE[norm_symbol(k)] = float(v)
+
+
+set_prices(os.environ.get("TADAWAL_PRICES", ""))
 
 
 def get_price(symbol, cfg=None, source=None):
-    """Last price and previous close: MT5 tick if connected, otherwise Yahoo (delayed)."""
+    """Last price and previous daily close: MT5 tick if connected, otherwise Yahoo (delayed)."""
+    sym = norm_symbol(symbol)
+    if sym in _PRICE_OVERRIDE:
+        return {"symbol": sym, "price": _PRICE_OVERRIDE[sym], "prev_close": None, "source": "override"}
     cfg = cfg or load_config()
     source = (source or cfg.get("data_source") or "auto").lower()
     if source in ("auto", "mt5"):
         mt5 = mt5_connect(cfg)
         if mt5:
-            sym = broker_symbol(symbol, cfg)
-            mt5.symbol_select(sym, True)
-            tk = mt5.symbol_info_tick(sym)
+            bs = broker_symbol(sym, cfg)
+            mt5.symbol_select(bs, True)
+            tk = mt5.symbol_info_tick(bs)
             if tk:
-                px = tk.last or (tk.bid + tk.ask) / 2
-                d1 = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_D1, 1, 1)
+                d1 = mt5.copy_rates_from_pos(bs, mt5.TIMEFRAME_D1, 1, 1)
                 prev = float(d1[0]["close"]) if d1 is not None and len(d1) else None
-                return {"symbol": symbol.upper(), "price": float(px), "bid": float(tk.bid), "ask": float(tk.ask),
+                return {"symbol": sym, "price": (float(tk.bid) + float(tk.ask)) / 2, "bid": float(tk.bid),
+                        "ask": float(tk.ask), "spread_pips": pips(float(tk.ask) - float(tk.bid), sym),
                         "prev_close": prev, "time": int(tk.time), "source": "mt5"}
             if source == "mt5":
-                die("no MT5 tick for %s" % sym)
-    url = "https://query1.finance.yahoo.com/v8/finance/chart/%s?range=1d&interval=5m" % symbol.upper()
+                die("no MT5 tick for %s" % bs)
+    url = "https://query1.finance.yahoo.com/v8/finance/chart/%s?range=1d&interval=5m" % urllib.request.quote(
+        yahoo_symbol(sym))
     try:
-        js = json.loads(http_get(url))
-        meta = js["chart"]["result"][0]["meta"]
+        meta = json.loads(http_get(url))["chart"]["result"][0]["meta"]
     except Exception as e:
-        die("no price for %s from Yahoo (%s)" % (symbol, e))
-    return {"symbol": symbol.upper(), "price": float(meta.get("regularMarketPrice")),
+        die("no price for %s from Yahoo (%s)" % (sym, e))
+    return {"symbol": sym, "price": float(meta.get("regularMarketPrice")),
             "prev_close": meta.get("chartPreviousClose") or meta.get("previousClose"),
             "time": meta.get("regularMarketTime"), "source": "yahoo (delayed)"}
 
 
-def add_data_args(ap, tf_default="D1", count_default=400):
+def add_data_args(ap, tf_default="H1", count_default=400):
     ap.add_argument("--tf", default=tf_default, help="M1 M5 M15 M30 H1 H4 D1 W1")
     ap.add_argument("--count", type=int, default=count_default, help="bars to load")
     ap.add_argument("--source", choices=["auto", "mt5", "yahoo"], default=None)
@@ -563,8 +674,7 @@ def macd(x, fast=12, slow=26, signal=9):
     ef, es = ema(x, fast), ema(x, slow)
     line = [None if a is None or b is None else a - b for a, b in zip(ef, es)]
     start = next((i for i, v in enumerate(line) if v is not None), len(line))
-    sig_part = ema(line[start:], signal) if start < len(line) else []
-    sig = [None] * start + sig_part
+    sig = [None] * start + (ema(line[start:], signal) if start < len(line) else [])
     hist = [None if a is None or b is None else a - b for a, b in zip(line, sig)]
     return line, sig, hist
 
@@ -574,9 +684,8 @@ def bollinger(x, n=20, k=2.0):
     up, lo = [None] * len(x), [None] * len(x)
     for i in range(n - 1, len(x)):
         w = x[i - n + 1:i + 1]
-        m = mid[i]
-        sd = math.sqrt(sum((v - m) ** 2 for v in w) / n)
-        up[i], lo[i] = m + k * sd, m - k * sd
+        sd = math.sqrt(sum((v - mid[i]) ** 2 for v in w) / n)
+        up[i], lo[i] = mid[i] + k * sd, mid[i] - k * sd
     return mid, up, lo
 
 
@@ -589,19 +698,7 @@ def lowest(x, n):
     return [None if i < n else min(x[i - n:i]) for i in range(len(x))]
 
 
-def slope(y):
-    """Least-squares slope per step."""
-    n = len(y)
-    if n < 2:
-        return 0.0
-    mx, my = (n - 1) / 2, sum(y) / n
-    num = sum((i - mx) * (v - my) for i, v in enumerate(y))
-    den = sum((i - mx) ** 2 for i in range(n))
-    return num / den if den else 0.0
-
-
 def slope_points(pts):
-    """Least-squares slope through [(x, y), ...]."""
     n = len(pts)
     if n < 2:
         return 0.0
@@ -612,7 +709,7 @@ def slope_points(pts):
 
 
 def pivots(b, left=3, right=3):
-    """Fractal swing points: [(index, 'H'|'L', price)], confirmed only (needs `right` bars after)."""
+    """Fractal swing points: [(index, 'H'|'L', price)], confirmed only."""
     out = []
     for i in range(left, len(b) - right):
         hw = b.h[i - left:i + right + 1]
@@ -625,8 +722,7 @@ def pivots(b, left=3, right=3):
 
 
 def zigzag(b, threshold, include_last=False):
-    """Alternating confirmed swing points; each leg moves at least `threshold` (price units).
-    With include_last=True the still-forming extreme is appended (marked tentative)."""
+    """Alternating confirmed swing points; each leg moves at least `threshold`."""
     n = len(b)
     if n < 2:
         return []
@@ -664,29 +760,23 @@ def zigzag(b, threshold, include_last=False):
 def levels(b, atr_value, lookback=250, left=3, right=3, max_levels=8):
     """Support/resistance: cluster swing points within 0.5*ATR; strength = touches."""
     start = max(0, len(b) - lookback)
-    pts = [p for p in pivots(b.slice(start), left, right)]
-    tol = max(atr_value * 0.5, 1e-9)
+    pts = pivots(b.slice(start), left, right)
+    tol = max(atr_value * 0.5, 1e-12)
     clusters = []
-    for i, kind, price in sorted(pts, key=lambda p: p[2]):
+    for i, _, price in sorted(pts, key=lambda p: p[2]):
         if clusters and price - clusters[-1]["prices"][-1] <= tol:
             clusters[-1]["prices"].append(price)
             clusters[-1]["last"] = max(clusters[-1]["last"], i + start)
         else:
             clusters.append({"prices": [price], "last": i + start})
-    out = []
-    for c in clusters:
-        out.append({"price": round(sum(c["prices"]) / len(c["prices"]), 4),
-                    "touches": len(c["prices"]), "last_touch": b.date(c["last"])})
+    out = [{"price": r(sum(c["prices"]) / len(c["prices"])), "touches": len(c["prices"]),
+            "last_touch": b.date(c["last"])} for c in clusters]
     out.sort(key=lambda d: (-d["touches"], d["price"]))
     return sorted(out[:max_levels], key=lambda d: d["price"])
 
 
-def r(x, n=2):
-    return None if x is None else round(float(x), n)
-
-
 # --------------------------------------------------------------------------
-# account, positions, contract specs (MT5 or local paper account)
+# account, positions, contract specs
 # --------------------------------------------------------------------------
 
 def use_mt5(cfg):
@@ -697,7 +787,7 @@ def paper_state(cfg=None):
     cfg = cfg or load_config()
     st = load_json(tpath("paper.json"), None)
     if st is None:
-        st = {"balance": float(cfg.get("account_balance", 10000)), "positions": [], "next_id": 1,
+        st = {"balance": float(cfg.get("account_balance", 10000)), "positions": [], "pending": [], "next_id": 1,
               "created": ny_now().isoformat()}
     return st
 
@@ -706,36 +796,81 @@ def save_paper(st):
     save_json(tpath("paper.json"), st)
 
 
-def symbol_spec(symbol, cfg=None):
-    """Contract specification. Stocks on the paper account: 1 lot = 1 share."""
+PRIORITY = ["XAU", "XAG", "EUR", "GBP", "AUD", "NZD", "USD", "CAD", "CHF", "JPY"]
+
+
+def market_pair(a, b):
+    """The way the market quotes two currencies: ('EUR','USD') -> 'EURUSD', ('JPY','USD') -> 'USDJPY'."""
+    ra = PRIORITY.index(a) if a in PRIORITY else 99
+    rb = PRIORITY.index(b) if b in PRIORITY else 99
+    return a + b if ra <= rb else b + a
+
+
+def conv_rate(ccy, acc, cfg=None, price_fn=None):
+    """How many units of `acc` one unit of `ccy` is worth."""
+    if ccy == acc:
+        return 1.0
+    price_fn = price_fn or (lambda s: get_price(s, cfg)["price"])
+    pair = market_pair(ccy, acc)
+    try:
+        p = price_fn(pair)
+    except SystemExit:
+        p = None
+    if p:
+        return p if pair.startswith(ccy) else 1.0 / p
+    if "USD" not in (ccy, acc):
+        return conv_rate(ccy, "USD", cfg, price_fn) * conv_rate("USD", acc, cfg, price_fn)
+    die("cannot convert %s to %s: no price for %s" % (ccy, acc, pair))
+
+
+def symbol_spec(symbol, cfg=None, price_fn=None):
+    """Contract specification. tick_value = account-currency P&L of one tick on 1 lot."""
     cfg = cfg or load_config()
-    if use_mt5(cfg) or (cfg.get("data_source") == "mt5"):
+    sym = norm_symbol(symbol)
+    if use_mt5(cfg) or cfg.get("data_source") == "mt5":
         mt5 = mt5_connect(cfg)
         if mt5:
-            sym = broker_symbol(symbol, cfg)
-            mt5.symbol_select(sym, True)
-            si = mt5.symbol_info(sym)
+            bs = broker_symbol(sym, cfg)
+            mt5.symbol_select(bs, True)
+            si = mt5.symbol_info(bs)
             if si is None:
-                die("symbol %s not found at your broker (set symbol_suffix / symbol_map in trader/config.json)" % sym)
-            return {"symbol": sym, "tick_size": si.trade_tick_size or si.point, "tick_value": si.trade_tick_value,
-                    "contract_size": si.trade_contract_size or 1, "volume_min": si.volume_min,
-                    "volume_max": si.volume_max, "volume_step": si.volume_step, "digits": si.digits,
-                    "currency_profit": getattr(si, "currency_profit", ""), "source": "mt5"}
-    step = float(cfg.get("paper_volume_step", 1))
-    return {"symbol": symbol.upper(), "tick_size": 0.01, "tick_value": 0.01, "contract_size": 1,
-            "volume_min": step, "volume_max": 1e9, "volume_step": step, "digits": 2, "source": "paper (shares)"}
+                die("symbol %s not found at your broker (set symbol_suffix / symbol_map in trader/config.json)" % bs)
+            return {"symbol": sym, "broker_symbol": bs, "tick_size": si.trade_tick_size or si.point,
+                    "tick_value": si.trade_tick_value, "contract_size": si.trade_contract_size or 1,
+                    "volume_min": si.volume_min, "volume_max": si.volume_max, "volume_step": si.volume_step,
+                    "digits": si.digits, "base": getattr(si, "currency_base", split_pair(sym)[0]),
+                    "quote": getattr(si, "currency_profit", split_pair(sym)[1]), "source": "mt5"}
+    base, quote = split_pair(sym)
+    if not base:
+        die("%s is not a currency pair (like EURUSD, GBPJPY, XAUUSD)" % symbol)
+    contract = 100.0 if base == "XAU" else (5000.0 if base == "XAG" else float(cfg.get("contract_size", 100000)))
+    point = 10 ** -digits_for(sym)
+    acc = cfg.get("currency", "USD")
+    return {"symbol": sym, "broker_symbol": sym, "tick_size": point,
+            "tick_value": contract * point * conv_rate(quote, acc, cfg, price_fn), "contract_size": contract,
+            "volume_min": 0.01, "volume_max": 100.0, "volume_step": 0.01, "digits": digits_for(sym),
+            "base": base, "quote": quote, "source": "standard lots"}
 
 
 def money_per_point(spec):
-    """Profit/loss in account currency for a 1.0 price move on 1 lot."""
+    """Account-currency P&L for a 1.0 price move on 1 lot."""
     return spec["tick_value"] / spec["tick_size"] if spec["tick_size"] else spec["contract_size"]
 
 
+def pip_value(spec):
+    """Account-currency value of one pip on 1 lot."""
+    return money_per_point(spec) * pip_size(spec["symbol"])
+
+
+def notional(spec, volume, price):
+    """Position size in account currency (base amount converted at `price`)."""
+    return volume * spec["contract_size"] * price * money_per_point(spec) / spec["contract_size"]
+
+
 def round_volume(vol, spec, down=True):
-    step = spec["volume_step"] or 1
+    step = spec["volume_step"] or 0.01
     k = math.floor(vol / step + 1e-9) if down else round(vol / step)
-    v = round(k * step, 8)
-    return min(v, spec["volume_max"])
+    return min(round(k * step, 8), spec["volume_max"])
 
 
 def account_snapshot(cfg=None):
@@ -745,26 +880,29 @@ def account_snapshot(cfg=None):
         ai = mt5.account_info()
         if ai is None:
             die("MT5 account_info() is empty: log in to your account in the terminal")
-        modes = {0: "demo", 1: "contest", 2: "real"}
         pos = []
         for p in mt5.positions_get() or []:
-            pos.append({"id": int(p.ticket), "symbol": p.symbol, "side": "buy" if p.type == 0 else "sell",
-                        "volume": float(p.volume), "entry": float(p.price_open), "sl": float(p.sl) or None,
-                        "tp": float(p.tp) or None, "price": float(p.price_current), "profit": float(p.profit)})
+            pos.append({"id": int(p.ticket), "symbol": norm_symbol(p.symbol), "broker_symbol": p.symbol,
+                        "side": "buy" if p.type == 0 else "sell", "volume": float(p.volume),
+                        "entry": float(p.price_open), "sl": float(p.sl) or None, "tp": float(p.tp) or None,
+                        "price": float(p.price_current), "profit": float(p.profit),
+                        "opened": dt.datetime.fromtimestamp(int(p.time), UTC).isoformat()})
         return {"mode": "mt5", "account": int(ai.login), "server": ai.server,
-                "trade_mode": modes.get(ai.trade_mode, str(ai.trade_mode)),
+                "trade_mode": {0: "demo", 1: "contest", 2: "real"}.get(ai.trade_mode, str(ai.trade_mode)),
                 "balance": float(ai.balance), "equity": float(ai.equity), "free_margin": float(ai.margin_free),
+                "margin": float(getattr(ai, "margin", 0.0)), "leverage": getattr(ai, "leverage", None),
                 "currency": ai.currency, "positions": pos}
     st = paper_state(cfg)
     pos = [dict(p) for p in st["positions"]]
     upl = 0.0
     for p in pos:
-        px = p.get("price") or p["entry"]
+        cur = p.get("price") or p["entry"]
         sign = 1 if p["side"] == "buy" else -1
-        p["profit"] = round(sign * (px - p["entry"]) * p["volume"] * p.get("mpp", 1), 2)
+        p["profit"] = round(sign * (cur - p["entry"]) * p["volume"] * p.get("mpp", 1), 2)
         upl += p["profit"]
-    return {"mode": "paper", "trade_mode": "paper", "balance": round(st["balance"], 2),
-            "equity": round(st["balance"] + upl, 2), "currency": cfg.get("currency", "USD"), "positions": pos}
+    return {"mode": cfg.get("mode", "paper"), "trade_mode": cfg.get("mode", "paper"), "balance": round(st["balance"], 2),
+            "equity": round(st["balance"] + upl, 2), "currency": cfg.get("currency", "USD"),
+            "leverage": cfg.get("leverage"), "positions": pos, "pending": st.get("pending", [])}
 
 
 def journal():
@@ -776,18 +914,28 @@ def save_journal(j):
 
 
 def realized_today(cfg=None):
-    """Realized P&L for today's New York date."""
+    """Realized P&L since 17:00 New York (the forex trading day)."""
     cfg = cfg or load_config()
-    today = ny_now().date()
+    now = ny_now()
+    start = now.replace(hour=17, minute=0, second=0, microsecond=0)
+    if now < start:
+        start -= dt.timedelta(days=1)
     if use_mt5(cfg):
         mt5 = mt5_connect(cfg, required=True)
-        start = dt.datetime.combine(today, dt.time(0, 0), NY).astimezone(dt.timezone.utc).replace(tzinfo=None)
-        deals = mt5.history_deals_get(start, dt.datetime.utcnow() + dt.timedelta(days=1)) or []
+        deals = mt5.history_deals_get(start.astimezone(UTC).replace(tzinfo=None),
+                                      dt.datetime.utcnow() + dt.timedelta(days=1)) or []
         return round(sum(d.profit + d.commission + d.swap for d in deals if d.entry in (1, 2, 3)), 2)
     tot = 0.0
     for t in journal()["trades"]:
-        if t.get("status") == "closed" and str(t.get("closed_at", ""))[:10] == today.isoformat():
-            tot += float(t.get("pnl") or 0)
+        if t.get("status") == "closed" and t.get("closed_at"):
+            try:
+                ca = dt.datetime.fromisoformat(str(t["closed_at"]))
+            except ValueError:
+                continue
+            if ca.tzinfo is None:
+                ca = ca.replace(tzinfo=NY)
+            if ca >= start:
+                tot += float(t.get("pnl") or 0)
     return round(tot, 2)
 
 
@@ -799,26 +947,14 @@ def save_orders(o):
     save_json(tpath("orders.json"), o)
 
 
-# --------------------------------------------------------------------------
-# SEC EDGAR
-# --------------------------------------------------------------------------
-
-def sec_json(url, ua, cache_name=None, max_age=12 * 3600):
-    if cache_name:
-        p = tpath("cache", "sec", cache_name)
-        if os.path.exists(p) and time.time() - os.path.getmtime(p) < max_age:
-            return load_json(p)
-    data = json.loads(http_get(url, ua=ua))
-    if cache_name:
-        save_json(tpath("cache", "sec", cache_name), data)
-    time.sleep(0.12)  # SEC asks for at most 10 requests per second
-    return data
-
-
-def sec_cik(ticker, ua):
-    data = sec_json("https://www.sec.gov/files/company_tickers.json", ua, "company_tickers.json", 7 * 86400)
-    t = ticker.upper().replace(".", "-")
-    for v in data.values():
-        if v["ticker"].upper() == t:
-            return int(v["cik_str"]), v.get("title", "")
-    die("ticker %s not found in SEC's list (US-listed companies only)" % ticker)
+def exposure(positions):
+    """Net direction per currency: long EURUSD = EUR +1, USD -1."""
+    ex = {}
+    for p in positions:
+        b, q = split_pair(p["symbol"])
+        if not b:
+            continue
+        s = 1 if p["side"] == "buy" else -1
+        ex[b] = ex.get(b, 0) + s
+        ex[q] = ex.get(q, 0) - s
+    return ex

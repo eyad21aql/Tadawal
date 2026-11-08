@@ -1,16 +1,16 @@
 ---
 name: news-monitor
 description: >-
-  News Monitor. Watches headlines (Yahoo Finance) and SEC 8-K filings for the
-  stocks the user holds or watches, shows only what is new since the last
-  check, decodes 8-K items (earnings, CEO/CFO change, restatement,
-  bankruptcy, delisting notice, impairment, cyber incident...), flags
-  severity and positions held, tags each item (earnings, guidance, analyst,
-  deal, legal, management, capital) and then judges in plain words whether it
-  is good or bad for the stock and why. Keeps a watchlist. Use when the user
-  says "any news on my stocks", "what's happening with Apple", "why is X
-  down", "morning briefing", "monitor the news", "check the 8-Ks", "أخبار
-  السهم", "وش صار على", "ليش نزل السهم", "أخبار محفظتي", "ملخص الصباح".
+  News Monitor for forex and gold. Watches headlines for the user's currency
+  pairs (Yahoo Finance, EURUSD=X...), press releases of the Federal Reserve,
+  ECB and Bank of England, and lists the next high-impact events for the
+  pairs' currencies; shows only what is new since the last check, flags rate
+  decisions and intervention talk, tags each item (rates, inflation, jobs,
+  growth, central bank, risk) and then explains in plain words what it means
+  for the currency and the pair. Keeps a watchlist. Use when the user says
+  "any news on EURUSD", "what's moving the dollar", "why did gold drop",
+  "what did the Fed say", "morning briefing", "أخبار اليورو دولار", "وش صار
+  على الدولار", "ليش طاح الذهب", "أخبار الفوركس", "ملخص الصباح".
 ---
 
 # News Monitor
@@ -20,39 +20,38 @@ description: >-
 From the user's project folder (`SKILL` = this skill's folder; `python` on Windows):
 
 ```bash
-python3 SKILL/news.py --tickers AAPL NVDA          # new items only
-python3 SKILL/news.py --tickers AAPL --hours 24 --all
-python3 SKILL/news.py                              # watchlist + open positions
-python3 SKILL/news.py --market                     # + S&P 500 / Nasdaq headlines
-python3 SKILL/news.py watch add AAPL MSFT | watch list | watch remove MSFT
+python3 SKILL/news.py --pairs EURUSD GBPJPY            # new items only
+python3 SKILL/news.py --pairs XAUUSD --hours 24 --all
+python3 SKILL/news.py                                  # watchlist + open trades
+python3 SKILL/news.py --no-banks                       # skip Fed / ECB / BoE releases
+python3 SKILL/news.py watch add EURUSD USDJPY XAUUSD | watch list | watch remove USDJPY
 ```
 
-SEC requires a contact: `SEC_USER_AGENT="Name email@example.com"` or
-`"sec_user_agent"` in `trader/config.json`. Without it 8-Ks are skipped and
-headlines still work.
+Run `economic-analyst` `econ.py calendar` first to also see the upcoming
+high-impact events for the pairs' currencies.
 
 ## Output
 
-`!!` severe (bankruptcy, restatement, delisting, auditor change, debt
-acceleration, impairment, change of control, cyber incident), `!` notable
-(earnings, management change, big deal), then date, ticker, `(+/-/?)`
-keyword hint, title, `[HELD]` when the user has a position.
+`!!` severe (rate decision, intervention), `!` central-bank release, then
+time (user's zone), pair or currency, `(+/-/?)` tone hint, title,
+`[OPEN TRADE]` when the user has a position in it.
 
-The `+/-` hint is a keyword count, nothing more. **You** do the judging:
-read the title and summary (open the link with WebFetch when it matters),
-then say for each important item: what happened, likely effect on the stock
-(positive / negative / unclear) and why, and whether it changes the plan for
-a position (e.g. earnings tomorrow -> consider the stop; restatement ->
-serious red flag).
+The `+/-` hint only counts words like "rises/falls", "hawkish/dovish". It is
+not a direction call. **You** judge: read title and summary (open the link
+with WebFetch when it matters) and say for each important item what
+happened, which currency it helps or hurts and why (hawkish central bank or
+hot data = usually stronger currency; dovish or weak data = weaker; risk-off
+= usually stronger USD, JPY, CHF and gold), and whether it changes the plan
+for an open trade (e.g. NFP in 30 minutes -> consider tightening the stop or
+taking partial profit).
 
-For "why is X down today" also search the web for the latest news, since RSS
-can lag.
+For "why did X move today", also search the web: RSS can lag.
 
 ## Answer format
 
-In the user's language. Group by stock, most severe first. 1-2 lines per
-item. End with "what to watch next" (earnings date, a level, a follow-up
-filing). For a morning briefing, combine with `price-alerts clock` and
-`order-executor positions`.
+In the user's language. Group by currency, most important first. 1-2 lines
+per item. End with "what to watch next" (the next red-flag release, a level,
+a central-bank speaker). For a morning briefing combine with
+`economic-analyst today`, `price-alerts clock` and `order-executor positions`.
 
 News moves fast and headlines can be wrong. Not financial advice.

@@ -1,16 +1,18 @@
 ---
 name: order-executor
 description: >-
-  Order Executor. Sends approved orders to MetaTrader 5 (market, limit or stop,
-  always with a stop-loss) or to a local paper account, one ticket at a time,
-  and only after the risk manager passed that exact order and the user typed
-  yes for it. Also shows open positions, tightens stops, closes positions
-  (fully or partly) and cancels pending orders. Refuses MT5 REAL accounts
-  unless the user enabled live trading themselves. Use when the user says
-  "place the order", "buy it", "execute", "send it to MT5", "close my
-  position", "move my stop", "cancel the order", "show my positions",
-  "connect MetaTrader", "نفذ الأمر", "اشتر", "بيع", "أرسله للميتاتريدر", "سكّر
-  الصفقة", "عدل الستوب", "ألغِ الأمر", "صفقاتي المفتوحة".
+  Order Executor for forex and gold. Turns an approved order into a trade, one
+  ticket at a time, only after the risk manager passed that exact order and
+  the user typed yes for it. Three modes: paper (simulated ledger), manual
+  (the user places it in the MetaTrader 5 phone app with exact step-by-step
+  instructions, then the fill is recorded, for phone-only traders) and mt5
+  (sent to the MT5 desktop terminal on Windows; demo by default, real
+  accounts refused unless the user enabled them; spread check). Also lists
+  positions, tightens stops, closes trades fully or partly and cancels orders.
+  Use when the user says "place the order", "buy EURUSD", "sell gold",
+  "execute", "close my trade", "move my stop", "cancel the order", "my open
+  trades", "I placed it at 1.0851", "نفذ الصفقة", "ادخل شراء", "ادخل بيع",
+  "سكّر الصفقة", "عدل الستوب", "ألغِ الأمر", "صفقاتي المفتوحة", "دخلت على".
 ---
 
 # Order Executor
@@ -19,67 +21,65 @@ This skill can move real money. Follow every step, every time.
 
 ## The rules (non-negotiable)
 
-1. Only orders in `trader/orders.json` that have a fresh PASS from
-   `risk-manager check` can be placed. Never edit a limit, the config, or
-   the order to get around a BLOCK.
-2. Show the ticket first (`order.py tickets`) and ask the user for a yes for
-   THAT ticket: side, volume, symbol, type, price, SL, TP, and the account
-   (paper / MT5 demo / MT5 REAL).
+1. Only orders in `trader/orders.json` with a fresh PASS from
+   `risk-manager check` can be placed. Never edit a limit, the config or the
+   order to get around a BLOCK.
+2. Show the ticket first (`order.py tickets`) and ask for a yes for THAT
+   ticket: side, lots, pair, type, price, SL, TP, and where it goes (paper /
+   manual / MT5 demo / MT5 REAL).
 3. Pass the user's own reply word for word in `--confirm`. Only their
-   latest message counts. A yes from earlier in the chat, or a general "go
-   ahead with everything", does not cover a new or changed ticket. Never
-   type the confirmation yourself.
-4. One ticket per yes. If the user approves several, place them one by one
-   and report each result.
-5. Never set `"allow_live": true` or switch `"mode"` yourself. If the user
-   asks, explain the risk, then show them the exact line to change in
-   `trader/config.json` and let them do it.
+   latest message counts. A yes from earlier, or "go ahead with everything",
+   does not cover a new or changed ticket. Never write the confirmation
+   yourself.
+4. One ticket per yes. Several approved: place them one by one, report each.
+5. Never set `"allow_live": true` or change `"mode"` yourself. If the user
+   asks, explain the risk and show them the exact line to change in
+   `trader/config.json`; they make the change.
 
 ## Run
 
 From the user's project folder (`SKILL` = this skill's folder; `python` on Windows):
 
 ```bash
-python3 SKILL/order.py account                         # which account/mode is active
-python3 SKILL/order.py tickets                         # READY tickets with their codes
+python3 SKILL/order.py account                                  # mode and account
+python3 SKILL/order.py tickets                                  # READY tickets with codes
 python3 SKILL/order.py place o1 --ticket 3fa2c1d09b7e --confirm "نعم"
-python3 SKILL/order.py positions                       # (paper: also fills resting orders, stops, targets)
-python3 SKILL/order.py modify 123456 --sl 188 --confirm "yes"    # stop can only tighten
-python3 SKILL/order.py close 123456 --confirm "yes" [--volume 5]
+python3 SKILL/order.py filled o1 --price 1.08512                # manual mode: record the fill
+python3 SKILL/order.py positions
+python3 SKILL/order.py modify 7 --sl 1.0850 --confirm "yes"     # stop can only tighten
+python3 SKILL/order.py close 7 --confirm "yes" [--volume 0.1] [--price 1.0890]
 python3 SKILL/order.py cancel o2
 ```
 
-The script itself enforces: ticket code = current order contents, PASS less
-than 60 minutes old, affirmative confirmation (rejects anything containing
-no / لا / wait / انتظر ...), each order placed once, stops never loosened,
-REAL accounts blocked unless `allow_live` is true. Every action is logged to
-`trader/executions.json` with the user's words.
+The script enforces: ticket code = current order contents, PASS younger
+than 60 minutes, a clear yes (anything with no / لا / wait / انتظر is
+refused), each ticket once, stops never loosened, MT5 REAL accounts blocked
+unless `allow_live`, MT5 spread under `max_spread_pips`. Every action is
+logged in `trader/executions.json` with the user's words.
 
-## Modes (trader/config.json)
+## Modes (trader/config.json "mode")
 
-- `"mode": "paper"` (default): simulated fills at the current price; market
-  orders only while NYSE is open; limit/stop orders rest until
-  `positions` sees the price reach them.
-- `"mode": "mt5"`: real orders to the MetaTrader 5 terminal. Needs Windows,
-  `pip install MetaTrader5`, the terminal open and logged in, and
-  **Algo Trading** switched on in its toolbar. US stocks at many MT5 brokers
-  are CFDs with a different symbol name (`AAPL.US`, `#AAPL`, `AAPL.NAS`):
-  set `symbol_suffix` or `symbol_map`. Start on a **demo** account.
+- **paper** (default): simulated fills at the current price; market orders
+  only while forex is open; limit/stop orders rest until `positions` sees
+  the price reach them; SL/TP applied by `positions`.
+- **manual** (phone app users): `place` prints the exact steps for the MT5
+  app (Quotes -> pair -> Trade -> type -> volume -> SL/TP -> Buy/Sell).
+  The user places it, then tells you the fill price or sends a screenshot
+  of the trade; record it with `filled o1 --price X`. `positions` flags
+  trades whose SL/TP was probably hit; record closes with
+  `close ID --price X --confirm yes` using the price from their app or
+  screenshot. Read screenshots of the MT5 Trade tab carefully (pair,
+  direction, volume, open price, SL, TP, profit).
+- **mt5** (Windows desktop): real orders to the MT5 terminal. Needs
+  `pip install MetaTrader5`, the terminal open and logged in, and the
+  **Algo Trading** button on. If the broker renames pairs (`EURUSDm`,
+  `EURUSD.pro`), set `symbol_suffix` / `symbol_map`. Start on **demo**.
 
-## Connecting MetaTrader 5 (walk the user through it)
-
-1. Install MetaTrader 5 from the broker, log in (demo first).
-2. `pip install MetaTrader5` (Windows Python 3.8+).
-3. In MT5: Tools -> Options -> Expert Advisors -> allow algorithmic trading;
-   press the **Algo Trading** button.
-4. In `trader/config.json`: `"mode": "mt5"`, `"data_source": "auto"`, and the
-   symbol suffix. Optional `"mt5": {"login": 123, "server": "Broker-Demo"}`
-   with the password in the `MT5_PASSWORD` environment variable, never in
-   the chat or a file.
-5. `order.py account` should show the account and `demo`.
+The MT5 phone app cannot be connected to a script; on a phone, use manual.
 
 ## Answer format
 
 In the user's language. Before placing: the ticket in one line plus "type
-yes to place this ticket" ("اكتب نعم لتنفيذ هذا الأمر"). After: PLACED or NOT
-PLACED, fill price, position number, and the next step (alerts, exit review).
+yes to place this ticket" ("اكتب نعم لتنفيذ هذه الصفقة"). After: PLACED /
+APPROVED - PLACE IT YOURSELF / NOT PLACED, the steps or the fill, and the
+next step (alerts, exit review).

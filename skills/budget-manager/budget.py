@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Budget Manager: how your capital is split, and how your trading is really doing.
 
-    python3 budget.py status                          # cash, invested, per-position share, limits left
-    python3 budget.py plan --capital 10000 --positions 5 --reserve 20
+    python3 budget.py status                          # equity, leverage, margin, limits left
+    python3 budget.py plan --capital 5000 --positions 3 --pairs EURUSD GBPJPY XAUUSD
     python3 budget.py report                          # win rate, profit factor, expectancy, drawdown
     python3 budget.py report --from 2026-10-01 --by symbol
     python3 budget.py journal                         # list trades (open and closed)
-    python3 budget.py journal-add AAPL buy 10 190 --exit 198 --opened 2026-10-01 --closed 2026-10-08 --sl 185
+    python3 budget.py journal-add EURUSD buy 0.3 1.0850 --exit 1.0910 --sl 1.0820 --opened 2026-11-02 --closed 2026-11-03
     python3 budget.py sync --days 90                  # import closed trades from MT5 history
-    python3 budget.py deposit 500 | withdraw 200      # paper account cash
+    python3 budget.py deposit 500 | withdraw 200      # paper/manual ledger cash
 
 The journal is trader/journal.json. Paper fills from the order executor are
 recorded automatically; MT5 trades come in with `sync`.
@@ -64,59 +64,66 @@ def group(trades, key):
 def cmd_status(a, cfg):
     acct = T.account_snapshot(cfg)
     bal, eq = acct["balance"], acct["equity"]
-    invested = 0.0
-    rows = []
+    L = ["BUDGET  %s  balance %.2f  equity %.2f %s" % (acct["mode"], bal, eq, acct["currency"])]
+    total = 0.0
     for p in acct["positions"]:
         spec = T.symbol_spec(p["symbol"], cfg)
-        val = p["volume"] * spec["contract_size"] * (p.get("price") or p["entry"])
-        invested += val
-        rows.append((p, val))
-    L = ["BUDGET  %s  balance %.2f  equity %.2f %s" % (acct["mode"], bal, eq, acct["currency"])]
-    for p, val in rows:
-        L.append("  %-6s %s %s  value %.2f = %.1f%% of equity%s" % (
-            p["symbol"], p["side"], p["volume"], val, val / eq * 100 if eq else 0,
-            "  ** over max_position_pct **" if eq and val / eq * 100 > cfg["max_position_pct"] else ""))
-    cash = eq - invested if acct["mode"] == "paper" else acct.get("free_margin", eq - invested)
-    L.append("invested %.2f (%.1f%%) | %s %.2f" % (invested, invested / eq * 100 if eq else 0,
-                                                  "cash" if acct["mode"] == "paper" else "free margin", cash))
+        val = T.notional(spec, p["volume"], p.get("price") or p["entry"])
+        total += val
+        L.append("  %-7s %s %s lots  notional %.0f = %.1fx equity  P&L %+.2f" % (
+            p["symbol"], p["side"], p["volume"], val, val / eq if eq else 0, p.get("profit", 0)))
+    lev = total / eq if eq else 0
+    margin = acct.get("margin") if acct["mode"] == "mt5" else total / float(cfg.get("leverage") or 100)
+    L.append("total notional %.0f = leverage %.1fx (your max %sx) | margin used ~%.2f | free ~%.2f" % (
+        total, lev, cfg["max_leverage"], margin or 0, acct.get("free_margin", eq - (margin or 0))))
     today = T.realized_today(cfg)
     j = T.journal()["trades"]
-    week0 = (T.ny_now().date() - dt.timedelta(days=T.ny_now().weekday())).isoformat()
-    month0 = T.ny_now().date().replace(day=1).isoformat()
-    wk = sum(t.get("pnl") or 0 for t in j if t.get("status") == "closed" and str(t.get("closed_at", ""))[:10] >= week0)
-    mo = sum(t.get("pnl") or 0 for t in j if t.get("status") == "closed" and str(t.get("closed_at", ""))[:10] >= month0)
+    d = T.ny_now().date()
+    week0 = (d - dt.timedelta(days=d.weekday())).isoformat()
+    month0 = d.replace(day=1).isoformat()
+    closed = [t for t in j if t.get("status") == "closed"]
+    wk = sum(t.get("pnl") or 0 for t in closed if str(t.get("closed_at", ""))[:10] >= week0)
+    mo = sum(t.get("pnl") or 0 for t in closed if str(t.get("closed_at", ""))[:10] >= month0)
     lim = bal * cfg["max_daily_loss_pct"] / 100
     L.append("realized: today %+.2f | this week %+.2f | this month %+.2f" % (today, wk, mo))
-    L.append("daily loss room left: %.2f of %.2f" % (max(0.0, lim + min(today, 0)), lim))
-    L.append("slots: %d of %d positions used | risk per new trade %.2f (%.1f%%)" % (
+    L.append("daily loss room left: %.2f of %.2f (the forex day resets at 17:00 New York)" % (max(0.0, lim + min(today, 0)), lim))
+    L.append("slots: %d of %d positions | risk per new trade %.2f (%.1f%%)" % (
         len(acct["positions"]), cfg["max_open_positions"], bal * cfg["risk_per_trade_pct"] / 100, cfg["risk_per_trade_pct"]))
-    T.emit({"account": acct, "invested": invested, "realized_today": today, "week": wk, "month": mo,
+    T.emit({"account": acct, "notional": total, "leverage": lev, "realized_today": today, "week": wk, "month": mo,
             "text": "\n".join(L)}, a.json)
     return 0
 
 
 def cmd_plan(a, cfg):
     cap = a.capital or T.account_snapshot(cfg)["balance"]
-    usable = cap * (1 - a.reserve / 100)
-    per = usable / a.positions
-    cap_pct = min(per / cap * 100, cfg["max_position_pct"])
-    per = cap * cap_pct / 100
-    risk = cap * cfg["risk_per_trade_pct"] / 100
-    L = ["BUDGET PLAN  capital %.2f" % cap,
-         "cash reserve %.0f%% = %.2f (never invested; covers drawdowns and opportunities)" % (a.reserve, cap * a.reserve / 100),
-         "up to %d positions x %.2f each (%.1f%% of capital; cap %s%%)" % (a.positions, per, cap_pct, cfg["max_position_pct"]),
-         "risk per trade %.2f (%.1f%%): the most one stop-out may cost" % (risk, cfg["risk_per_trade_pct"]),
-         "worst case if every position stops out: %.2f (%.1f%%)" % (risk * a.positions, risk * a.positions / cap * 100),
-         "daily loss limit %.2f (%.1f%%): stop trading for the day when hit" % (cap * cfg["max_daily_loss_pct"] / 100,
-                                                                               cfg["max_daily_loss_pct"])]
-    if a.prices:
-        L.append("max size at your per-position budget:")
-        for s in a.prices:
-            sym, px = s.split("=")
-            L.append("  %s @ %s -> %d shares" % (sym.upper(), px, int(per // float(px))))
-    if risk * a.positions / cap * 100 > cfg.get("max_total_risk_pct", 6):
-        L.append("warning: all positions at full risk exceed max_total_risk_pct %s%%" % cfg.get("max_total_risk_pct", 6))
-    T.emit({"capital": cap, "per_position": per, "risk_per_trade": risk, "text": "\n".join(L)}, a.json)
+    risk_pct = a.risk_pct or cfg["risk_per_trade_pct"]
+    risk = cap * risk_pct / 100
+    n = a.positions
+    L = ["BUDGET PLAN  capital %.2f %s" % (cap, cfg["currency"]),
+         "risk per trade %.2f (%.1f%%): the most one stop-out may cost" % (risk, risk_pct),
+         "max %d trades at once -> worst case if all stop out: %.2f (%.1f%%)" % (n, risk * n, risk_pct * n),
+         "daily loss limit %.2f (%.1f%%): stop for the day when hit" % (cap * cfg["max_daily_loss_pct"] / 100,
+                                                                      cfg["max_daily_loss_pct"]),
+         "losing streak check: 10 losses in a row at this risk = -%.1f%% of the account" % ((1 - (1 - risk_pct / 100) ** 10) * 100),
+         "", "lot size for that risk, by stop distance:"]
+    rows = []
+    stops = a.stops or [15, 25, 40, 60]
+    L.append("  %-8s %s" % ("pair", "  ".join("%3d pips" % x for x in stops)))
+    for sym in a.pairs:
+        try:
+            spec = T.symbol_spec(sym, cfg)
+        except SystemExit:
+            L.append("  %-8s (no price: pass TADAWAL_PRICES or connect MT5)" % T.norm_symbol(sym))
+            continue
+        pv = T.pip_value(spec)
+        lots = [T.round_volume(risk / (x * pv), spec) for x in stops]
+        rows.append({"symbol": spec["symbol"], "pip_value": round(pv, 2), "lots": dict(zip(stops, lots))})
+        L.append("  %-8s %s" % (spec["symbol"], "  ".join("%8s" % l_ for l_ in lots)))
+    if risk_pct * n > cfg["max_total_risk_pct"]:
+        L.append("warning: %d trades at full risk exceed max_total_risk_pct %s%%" % (n, cfg["max_total_risk_pct"]))
+    if risk_pct > 2:
+        L.append("warning: more than 2%% per trade makes a normal losing streak very expensive")
+    T.emit({"capital": cap, "risk_per_trade": risk, "table": rows, "text": "\n".join(L)}, a.json)
     return 0
 
 
@@ -153,10 +160,11 @@ def cmd_report(a, cfg):
 
 def cmd_journal(a, cfg):
     j = T.journal()["trades"]
-    L = ["%-10s %-6s %-4s %8s %10s %10s %10s %s" % ("id", "symbol", "side", "volume", "entry", "exit", "pnl", "status")]
+    L = ["%-10s %-7s %-4s %6s %10s %10s %7s %9s %s" % ("id", "pair", "side", "lots", "entry", "exit", "pips", "pnl", "status")]
     for t in j[-a.last:]:
-        L.append("%-10s %-6s %-4s %8s %10s %10s %10s %s %s" % (
-            t.get("id"), t["symbol"], t["side"], t["volume"], t["entry"], t.get("exit", ""), t.get("pnl", ""),
+        L.append("%-10s %-7s %-4s %6s %10s %10s %7s %9s %s %s" % (
+            t.get("id"), t["symbol"], t["side"], t["volume"], T.px(t["entry"], t["symbol"]),
+            T.px(t["exit"], t["symbol"]) if t.get("exit") is not None else "", t.get("pips", ""), t.get("pnl", ""),
             t.get("status"), str(t.get("closed_at") or t.get("opened_at") or "")[:10]))
     T.emit({"trades": j[-a.last:], "text": "\n".join(L)}, a.json)
     return 0
@@ -164,17 +172,20 @@ def cmd_journal(a, cfg):
 
 def cmd_journal_add(a, cfg):
     j = T.journal()
-    t = {"id": "j%d" % (len(j["trades"]) + 1), "mode": "manual", "symbol": a.symbol.upper(), "side": a.side,
+    t = {"id": "j%d" % (len(j["trades"]) + 1), "mode": "journal", "symbol": T.norm_symbol(a.symbol), "side": a.side,
          "volume": a.volume, "entry": a.entry, "sl": a.sl, "tp": a.tp, "opened_at": a.opened or T.ny_now().date().isoformat(),
          "status": "open", "note": a.note}
     if a.exit is not None:
         sgn = 1 if a.side == "buy" else -1
         t["exit"] = a.exit
-        t["pnl"] = round(sgn * (a.exit - a.entry) * a.volume - (a.fees or 0), 2)
+        t["pips"] = T.pips(sgn * (a.exit - a.entry), t["symbol"])
+        mpp = T.money_per_point(T.symbol_spec(t["symbol"], cfg)) if a.pnl is None else 0
+        t["pnl"] = round(a.pnl if a.pnl is not None else sgn * (a.exit - a.entry) * a.volume * mpp - (a.fees or 0), 2)
         t["closed_at"] = a.closed or T.ny_now().date().isoformat()
         t["status"] = "closed"
         if a.sl:
-            t["r"] = round(t["pnl"] / (abs(a.entry - a.sl) * a.volume), 2)
+            risk = abs(a.entry - a.sl) * a.volume * T.money_per_point(T.symbol_spec(t["symbol"], cfg))
+            t["r"] = round(t["pnl"] / risk, 2) if risk else None
     j["trades"].append(t)
     T.save_journal(j)
     T.emit({"trade": t, "text": "added %s" % t["id"]}, a.json)
@@ -206,7 +217,7 @@ def cmd_sync(a, cfg):
             if t.get("mode") == "mt5" and t.get("status") == "open" and t.get("position") == pid:
                 rec = t
         if rec is None:
-            rec = {"id": "m%d" % pid, "position": pid, "mode": "mt5", "symbol": e.symbol, "side": "buy" if e.type == 0 else "sell",
+            rec = {"id": "m%d" % pid, "position": pid, "mode": "mt5", "symbol": T.norm_symbol(e.symbol), "side": "buy" if e.type == 0 else "sell",
                    "volume": e.volume, "entry": e.price, "opened_at": dt.datetime.utcfromtimestamp(e.time).isoformat()}
             j["trades"].append(rec)
         risk = abs(rec["entry"] - rec["sl"]) * vol * T.money_per_point(T.symbol_spec(rec["symbol"], cfg)) if rec.get("sl") else None
@@ -219,8 +230,8 @@ def cmd_sync(a, cfg):
 
 
 def cmd_cash(a, cfg, sign):
-    if cfg["mode"] != "paper":
-        T.die("deposits/withdrawals only apply to the paper account; MT5 balances come from your broker")
+    if cfg["mode"] not in ("paper", "manual"):
+        T.die("deposits/withdrawals only apply to the paper/manual ledger; MT5 balances come from your broker")
     st = T.paper_state(cfg)
     st["balance"] = round(st["balance"] + sign * a.amount, 2)
     st.setdefault("cash_moves", []).append({"at": T.ny_now().isoformat(timespec="seconds"), "amount": sign * a.amount})
@@ -236,9 +247,10 @@ def main(argv=None):
     sub.add_parser("status")
     p = sub.add_parser("plan")
     p.add_argument("--capital", type=float)
-    p.add_argument("--positions", type=int, default=5)
-    p.add_argument("--reserve", type=float, default=20.0, help="%% kept in cash")
-    p.add_argument("--prices", nargs="*", help="SYMBOL=PRICE pairs to show max shares")
+    p.add_argument("--positions", type=int, default=3, help="max trades open at once")
+    p.add_argument("--risk-pct", type=float)
+    p.add_argument("--pairs", nargs="*", default=["EURUSD", "GBPUSD", "USDJPY", "XAUUSD"])
+    p.add_argument("--stops", nargs="*", type=float, help="stop distances in pips for the table")
     r = sub.add_parser("report")
     r.add_argument("--from", dest="date_from")
     r.add_argument("--to", dest="date_to")
@@ -254,6 +266,7 @@ def main(argv=None):
     ja.add_argument("--sl", type=float)
     ja.add_argument("--tp", type=float)
     ja.add_argument("--fees", type=float)
+    ja.add_argument("--pnl", type=float, help="the P&L shown in the app (overrides the calculation)")
     ja.add_argument("--opened")
     ja.add_argument("--closed")
     ja.add_argument("--note", default="")
@@ -263,7 +276,6 @@ def main(argv=None):
         sub.add_parser(name).add_argument("amount", type=float)
     a = ap.parse_args(argv)
     cfg = T.load_config()
-    cfg.setdefault("max_total_risk_pct", 6.0)
     if a.cmd in ("deposit", "withdraw"):
         return cmd_cash(a, cfg, 1 if a.cmd == "deposit" else -1)
     return {"status": cmd_status, "plan": cmd_plan, "report": cmd_report, "journal": cmd_journal,
