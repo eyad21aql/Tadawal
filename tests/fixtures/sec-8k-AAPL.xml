@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+<company-info><cik>0000320193</cik><conformed-name>Apple Inc.</conformed-name></company-info>
+<entry>
+<category label="form type" scheme="https://www.sec.gov/" term="8-K"/>
+<id>urn:tag:sec.gov,2008:accession-number=0000320193-26-000101</id>
+<link href="https://www.sec.gov/Archives/edgar/data/320193/000032019326000101/0000320193-26-000101-index.htm" rel="alternate" type="text/html"/>
+<summary type="html"> &lt;b&gt;Filed:&lt;/b&gt; 2026-10-30 &lt;b&gt;AccNo:&lt;/b&gt; 0000320193-26-000101 &lt;b&gt;Size:&lt;/b&gt; 1 MB&lt;br&gt;Item 2.02: Results of Operations and Financial Condition&lt;br&gt;Item 9.01: Financial Statements and Exhibits</summary>
+<title>8-K  - Current report</title>
+<updated>2026-10-30T16:31:02-04:00</updated>
+</entry>
+<entry>
+<category label="form type" scheme="https://www.sec.gov/" term="8-K"/>
+<link href="https://www.sec.gov/Archives/edgar/data/320193/000032019326000090/0000320193-26-000090-index.htm" rel="alternate" type="text/html"/>
+<summary type="html"> &lt;b&gt;Filed:&lt;/b&gt; 2026-09-01 Item 4.02: Non-Reliance on Previously Issued Financial Statements&lt;br&gt;Item 5.02: Departure of Directors</summary>
+<title>8-K  - Current report</title>
+<updated>2026-09-01T08:00:00-04:00</updated>
+</entry>
+</feed>

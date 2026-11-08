@@ -1,0 +1,20 @@
+{
+  "mode": "paper",
+  "allow_live": false,
+  "data_source": "auto",
+  "symbol_suffix": "",
+  "symbol_map": {},
+  "account_balance": 10000,
+  "currency": "USD",
+  "risk_per_trade_pct": 1.0,
+  "max_total_risk_pct": 6.0,
+  "max_open_positions": 5,
+  "max_daily_loss_pct": 3.0,
+  "max_position_pct": 25,
+  "min_rr": 1.5,
+  "blocked_symbols": [],
+  "allow_short": false,
+  "sec_user_agent": "Your Name you@example.com",
+  "mt5": {"path": null, "login": null, "server": null},
+  "magic": 2126
+}

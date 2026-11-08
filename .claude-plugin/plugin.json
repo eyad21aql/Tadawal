@@ -1,0 +1,11 @@
+{
+  "name": "tadawal",
+  "description": "11 trading skills for US stocks with MetaTrader 5: entry timing, chart patterns, news, earnings, Congress trades, risk, exits, backtests, alerts, budget and order execution with your explicit yes.",
+  "version": "1.0.0",
+  "author": {
+    "name": "eyad21aql"
+  },
+  "homepage": "https://github.com/eyad21aql/Tadawal",
+  "repository": "https://github.com/eyad21aql/Tadawal",
+  "keywords": ["trading", "metatrader5", "mt5", "stocks", "backtesting", "risk-management", "arabic"]
+}

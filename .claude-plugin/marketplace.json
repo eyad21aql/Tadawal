@@ -1,0 +1,14 @@
+{
+  "name": "tadawal",
+  "owner": {
+    "name": "eyad21aql"
+  },
+  "plugins": [
+    {
+      "name": "tadawal",
+      "source": "./",
+      "description": "11 trading skills for US stocks with MetaTrader 5.",
+      "category": "productivity"
+    }
+  ]
+}
