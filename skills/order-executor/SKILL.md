@@ -37,7 +37,14 @@ This skill can move real money. Follow every step, every time.
    wants it, ask for their reason and pass it with
    `--override-plan "<their words>"`; it is recorded as a rule break. Never
    override on your own.
-6. Never set `"allow_live": true` or change `"mode"` yourself. If the user
+6. No overnight (`"no_overnight": true`): new trades are refused after
+   `last_entry_ny`, and this cannot be overridden. Before `flat_by_ny`, make
+   sure everything is closed: `flat` lists it; `flat --close` closes it after
+   the user's yes (paper/mt5) or gives the steps for the phone app (manual).
+   Paper positions and resting orders are closed/cancelled automatically at
+   the flat time; in manual mode `positions` shouts "CLOSE NOW". MT5 pending
+   orders get an expiry at the flat time.
+7. Never set `"allow_live": true` or change `"mode"` yourself. If the user
    asks, explain the risk and show them the exact line to change in
    `trader/config.json`; they make the change.
 
@@ -54,6 +61,8 @@ python3 SKILL/order.py positions
 python3 SKILL/order.py modify 7 --sl 1.0850 --confirm "yes"     # stop can only tighten
 python3 SKILL/order.py close 7 --confirm "yes" [--volume 0.1] [--price 1.0890]
 python3 SKILL/order.py cancel o2
+python3 SKILL/order.py flat                                     # no overnight: what must be closed
+python3 SKILL/order.py flat --close --confirm "نعم"             # close everything before the rollover
 ```
 
 The script enforces: ticket code = current order contents, PASS younger

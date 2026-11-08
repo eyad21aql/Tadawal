@@ -101,6 +101,7 @@ def check_orders(orders, cfg=None, acct=None, today_pnl=None, price_of=None, spe
         else:
             open_risk = float("inf")
     held = {(T.norm_symbol(p["symbol"]), p["side"]) for p in positions}
+    ovn = T.overnight_status(cfg)
     seen, results = set(), []
     for o in orders:
         R, W = [], []
@@ -172,6 +173,12 @@ def check_orders(orders, cfg=None, acct=None, today_pnl=None, price_of=None, spe
         if today_pnl <= -bal * float(cfg["max_daily_loss_pct"]) / 100:
             R.append("daily loss limit hit: %.2f today (max %.1f%%). No new trades until the next trading day "
                      "(17:00 New York)." % (today_pnl, cfg["max_daily_loss_pct"]))
+        if not ovn["can_open"]:
+            R.append("no-overnight rule: no new trades after %s your time; everything is closed by %s, before the "
+                     "rollover at %s. Next window opens after the rollover." % (
+                         ovn["last_entry_local"], ovn["flat_local"], ovn["rollover_local"]))
+        elif ovn["active"] and o.get("type", "market") != "market":
+            W.append("pending order: it is cancelled at %s your time if it has not filled (no overnight)" % ovn["flat_local"])
         if (sym, side) in held:
             W.append("you already hold a %s position in %s" % (side, sym))
         if (sym, side) in seen:

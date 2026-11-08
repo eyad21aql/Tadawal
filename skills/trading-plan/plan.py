@@ -2,6 +2,8 @@
 """Trading Plan: write your rules once, then every trade is checked against them.
 
     python3 plan.py init --style day              # templates: scalp | day | swing | smc
+    python3 plan.py init --style scalp --pairs EURUSD XAUUSD --sessions london newyork --no-overnight
+    python3 plan.py set stop_pips_for XAUUSD 20 60
     python3 plan.py show
     python3 plan.py set pairs EURUSD GBPUSD XAUUSD
     python3 plan.py set max_trades_per_day 2
@@ -38,12 +40,14 @@ TEMPLATES = {
     "scalp": {
         "pairs": ["EURUSD", "GBPUSD", "USDJPY"], "sessions": ["London", "New York"],
         "timeframes": {"bias": "H1", "entry": "M5"}, "stop_pips": [5, 15], "min_rr": 1.5,
+        "stop_pips_by_pair": {"EURUSD": [5, 15], "GBPUSD": [6, 18], "USDJPY": [6, 18], "XAUUSD": [20, 60]},
         "max_trades_per_day": 5, "max_losses_in_a_row": 3,
         "setups": {"session-open-breakout": "Break of the Asian range in the first hour of London or New York, entry on retest",
                    "ema-pullback": "M5 trend with H1, pullback to EMA20, bullish/bearish rejection candle"}},
     "day": {
         "pairs": ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD"], "sessions": ["London", "New York"],
         "timeframes": {"bias": "H4", "entry": "H1"}, "stop_pips": [15, 50], "min_rr": 2.0,
+        "stop_pips_by_pair": {"XAUUSD": [50, 200]},
         "max_trades_per_day": 3, "max_losses_in_a_row": 2,
         "setups": {"trend-pullback": "H4 trend, H1 pullback to EMA20/50 or a marked level, confirmation candle closed",
                    "breakout-retest": "H1 close beyond a marked level, entry on the retest, stop behind the level",
@@ -51,6 +55,7 @@ TEMPLATES = {
     "swing": {
         "pairs": ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "XAUUSD"], "sessions": [],
         "timeframes": {"bias": "D1", "entry": "H4"}, "stop_pips": [40, 200], "min_rr": 2.0,
+        "stop_pips_by_pair": {"XAUUSD": [150, 600]},
         "max_trades_per_day": 2, "max_losses_in_a_row": 3,
         "setups": {"d1-trend-pullback": "D1 trend, H4 pullback into a D1 level, H4 confirmation",
                    "weekly-level-reaction": "Rejection of a weekly level with a D1 reversal candle",
@@ -58,6 +63,7 @@ TEMPLATES = {
     "smc": {
         "pairs": ["EURUSD", "GBPUSD", "XAUUSD"], "sessions": ["London", "New York"],
         "timeframes": {"bias": "H4", "entry": "M15"}, "stop_pips": [10, 40], "min_rr": 3.0,
+        "stop_pips_by_pair": {"XAUUSD": [30, 150]},
         "max_trades_per_day": 2, "max_losses_in_a_row": 2,
         "setups": {"sweep-choch-ob": "Liquidity sweep, CHoCH on M15, entry at the order block that caused it",
                    "fvg-in-discount": "H4 bullish structure, price in discount, entry at an unfilled M15 FVG (mirror for sells)",
@@ -66,6 +72,7 @@ TEMPLATES = {
 COMMON = {"max_weekly_loss_pct": 6.0, "news_blackout_minutes": [30, 15], "friday_cutoff_ny": "12:00",
           "sunday_open_wait_minutes": 60, "checklist": CHECKLIST, "enforce": True}
 PASS_MAX_AGE_MIN = 60
+SESSION_NAMES = {"london": "London", "newyork": "New York", "ny": "New York", "tokyo": "Tokyo", "sydney": "Sydney"}
 
 
 def plan_path():
@@ -138,9 +145,15 @@ def news_blocks(symbol, plan, now=None):
     return out
 
 
-def evaluate(order, plan, clock, stats, balance, news, checklist=None):
+def stop_range(plan, sym):
+    return (plan.get("stop_pips_by_pair") or {}).get(sym) or plan.get("stop_pips", [0, 1e9])
+
+
+def evaluate(order, plan, clock, stats, balance, news, checklist=None, ovn=None):
     """Return (verdict, reasons, notes). Pure given its inputs."""
     R, N = [], []
+    if ovn and ovn.get("active") and not ovn.get("can_open"):
+        R.append("no overnight: no new trades after %s your time (rollover %s)" % (ovn["last_entry_local"], ovn["rollover_local"]))
     sym = T.norm_symbol(order.get("symbol"))
     if plan.get("pairs") and sym not in plan["pairs"]:
         R.append("%s is not one of your plan pairs (%s)" % (sym, ", ".join(plan["pairs"])))
@@ -151,9 +164,9 @@ def evaluate(order, plan, clock, stats, balance, news, checklist=None):
         R.append("setup %r is not in your plan (%s)" % (setup, ", ".join(plan.get("setups", {}))))
     if order.get("entry") and order.get("sl"):
         sp = T.pips(abs(float(order["entry"]) - float(order["sl"])), sym)
-        lo, hi = plan.get("stop_pips", [0, 1e9])
+        lo, hi = stop_range(plan, sym)
         if not lo <= sp <= hi:
-            R.append("stop is %s pips; your plan says %s-%s for this style" % (sp, lo, hi))
+            R.append("stop is %s pips; your plan says %s-%s for %s" % (sp, lo, hi, sym))
         if order.get("tp"):
             rr = abs(float(order["tp"]) - float(order["entry"])) / abs(float(order["entry"]) - float(order["sl"]))
             if rr < float(plan.get("min_rr", 0)) - 1e-9:
@@ -215,7 +228,10 @@ def render_plan(p):
          "pairs: %s" % ", ".join(p.get("pairs") or ["any"]),
          "sessions: %s" % ", ".join(p.get("sessions") or ["any"]),
          "timeframes: bias %s, entry %s" % (p["timeframes"]["bias"], p["timeframes"]["entry"]),
-         "stop: %s-%s pips | min reward:risk %s" % (p["stop_pips"][0], p["stop_pips"][1], p["min_rr"]),
+         "stop: %s pips | min reward:risk %s" % (", ".join(
+             "%s %s-%s" % (k, v[0], v[1]) for k, v in sorted((p.get("stop_pips_by_pair") or {}).items())
+             if not p.get("pairs") or k in p["pairs"]) or "%s-%s" % tuple(p["stop_pips"]), p["min_rr"]),
+         "no overnight (no swap): %s" % ("YES, every trade closed before the 17:00 New York rollover" if p.get("no_overnight") else "no"),
          "max %s trades a day | stop after %s losses in a row | weekly loss limit %s%%" % (
              p["max_trades_per_day"], p["max_losses_in_a_row"], p["max_weekly_loss_pct"]),
          "news blackout: %s min before, %s min after high-impact news" % tuple(p["news_blackout_minutes"]),
@@ -235,6 +251,9 @@ def main(argv=None):
     i = sub.add_parser("init")
     i.add_argument("--style", choices=sorted(TEMPLATES), default="day")
     i.add_argument("--force", action="store_true")
+    i.add_argument("--pairs", nargs="*")
+    i.add_argument("--sessions", nargs="*", help="london newyork tokyo sydney, or any")
+    i.add_argument("--no-overnight", action="store_true", help="never hold through the rollover (also set in config)")
     sub.add_parser("show")
     s = sub.add_parser("set")
     s.add_argument("key")
@@ -255,6 +274,15 @@ def main(argv=None):
             T.die("a plan already exists (plan.py show). Use --force to replace it.")
         p = dict(COMMON, **json.loads(json.dumps(TEMPLATES[a.style])), style=a.style,
                  created=T.ny_now().isoformat(timespec="seconds"))
+        if a.pairs:
+            p["pairs"] = [T.norm_symbol(x) for x in a.pairs]
+        if a.sessions:
+            p["sessions"] = [SESSION_NAMES[x.lower().replace(" ", "")] for x in a.sessions if x.lower() != "any"]
+        if a.no_overnight:
+            p["no_overnight"] = True
+            c = T.load_json(T.tpath("config.json"), {}) or {}
+            c["no_overnight"] = True
+            T.save_json(T.tpath("config.json"), c)
         T.save_json(plan_path(), p)
         T.emit(dict(plan=p, text="plan created from the %s template; adjust it with the user:\n%s" % (
             a.style, render_plan(p))), a.json)
@@ -268,10 +296,11 @@ def main(argv=None):
         if k in ("pairs",):
             p[k] = [T.norm_symbol(v) for v in vals]
         elif k == "sessions":
-            names = {"london": "London", "newyork": "New York", "ny": "New York", "tokyo": "Tokyo", "sydney": "Sydney"}
-            p[k] = [names[v.lower().replace(" ", "")] for v in vals if v.lower() != "any"]
+            p[k] = [SESSION_NAMES[v.lower().replace(" ", "")] for v in vals if v.lower() != "any"]
         elif k in ("stop_pips", "news_blackout_minutes"):
             p[k] = [float(v) for v in vals][:2]
+        elif k == "stop_pips_for":
+            p.setdefault("stop_pips_by_pair", {})[T.norm_symbol(vals[0])] = [float(v) for v in vals[1:3]]
         elif k in ("max_trades_per_day", "max_losses_in_a_row", "sunday_open_wait_minutes"):
             p[k] = int(vals[0])
         elif k in ("min_rr", "max_weekly_loss_pct"):
@@ -312,6 +341,12 @@ def main(argv=None):
                  stats["trades_today"], p["max_trades_per_day"], stats["losses_in_a_row"], p["max_losses_in_a_row"],
                  stats["week_pnl"], bal * p["max_weekly_loss_pct"] / 100)]
         stop = []
+        ovn = T.overnight_status(cfg)
+        if ovn["active"]:
+            L.append("no overnight: last new trade %s, everything closed by %s, rollover %s (your time)" % (
+                ovn["last_entry_local"], ovn["flat_local"], ovn["rollover_local"]))
+            if not ovn["can_open"]:
+                stop.append("too close to the rollover for new trades")
         if stats["trades_today"] >= p["max_trades_per_day"]:
             stop.append("daily trade limit reached")
         if stats["losses_in_a_row"] >= p["max_losses_in_a_row"]:
@@ -339,7 +374,7 @@ def main(argv=None):
     verdicts = T.load_json(T.tpath("plan_verdicts.json"), {}) or {}
     L, out = ["PLAN CHECK  (%s)" % clock["status"]], []
     for o in sel:
-        v, R, N = evaluate(o, p, clock, stats, bal, news_blocks(o["symbol"], p), answers)
+        v, R, N = evaluate(o, p, clock, stats, bal, news_blocks(o["symbol"], p), answers, T.overnight_status(cfg))
         h = T.order_hash(o)
         verdicts[h] = {"verdict": v, "order_id": o.get("id"), "reasons": R, "checked_at": T.ny_now().isoformat(timespec="seconds"),
                        "checklist": answers}

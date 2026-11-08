@@ -12,7 +12,7 @@ DAY = 86400
 T0 = 1704205800  # 2024-01-02 14:30 UTC
 
 
-def from_closes(closes, symbol="TEST", tf="D1", spread=0.01, seed=1, vol=1_000_000):
+def from_closes(closes, symbol="TEST", tf="D1", spread=0.01, seed=1, vol=1_000_000, step=None):
     rnd = random.Random(seed)
     t, o, h, l, c, v = [], [], [], [], [], []
     prev = closes[0]
@@ -20,7 +20,7 @@ def from_closes(closes, symbol="TEST", tf="D1", spread=0.01, seed=1, vol=1_000_0
         op = prev
         hi = max(op, cl) * (1 + spread * rnd.random())
         lo = min(op, cl) * (1 - spread * rnd.random())
-        t.append(T0 + k * DAY); o.append(op); h.append(hi); l.append(lo); c.append(cl)
+        t.append(T0 + k * (step or DAY)); o.append(op); h.append(hi); l.append(lo); c.append(cl)
         v.append(vol * (0.7 + 0.6 * rnd.random()))
         prev = cl
     return T.Bars(symbol, tf, t, o, h, l, c, v, "synthetic")

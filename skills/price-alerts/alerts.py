@@ -88,6 +88,32 @@ def evaluate(alerts, prices, clock, today):
     return rings
 
 
+def overnight_rings(cfg, st, now=None, positions=None):
+    """No-overnight accounts: ring 30 and 10 minutes before the flat time, and inside the flat window."""
+    ovn = T.overnight_status(cfg, now)
+    if not ovn["active"]:
+        return []
+    if positions is None:
+        try:
+            positions = T.account_snapshot(cfg)["positions"]
+        except SystemExit:
+            positions = []
+    if not positions:
+        return []
+    day = T.last_rollover(now).date().isoformat()
+    left = ovn.get("minutes_to_flat", 9999)
+    marks = st.setdefault("overnight_marks", {})
+    out = []
+    for mark, cond in (("30", 10 < left <= 30), ("10", 0 < left <= 10), ("now", ovn["must_close"])):
+        key = "%s-%s" % (day, mark)
+        if cond and key not in marks:
+            marks[key] = True
+            what = "CLOSE ALL TRADES NOW" if mark == "now" else "%d minutes left to close all trades" % left
+            out.append({"id": "flat", "symbol": "ALL", "msg": "%s (no overnight: rollover %s your time, %d open)" % (
+                what, ovn["rollover_local"], len(positions))})
+    return out
+
+
 def check(cfg, quiet=False):
     st = load()
     clock = T.market_clock(cfg=cfg)
@@ -103,6 +129,7 @@ def check(cfg, quiet=False):
     allp.update(prices)
     T.save_json(T.tpath("prices.json"), allp)
     rings = evaluate(st["alerts"], prices, clock, T.ny_now().date().isoformat())
+    rings += overnight_rings(cfg, st)
     save(st)
     L = []
     for r in rings:

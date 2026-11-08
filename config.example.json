@@ -16,9 +16,20 @@
   "max_leverage": 10,
   "max_same_currency": 2,
   "max_spread_pips": 3.0,
+  "max_spread_by_symbol": {
+    "EURUSD": 1.5,
+    "XAUUSD": 4.0
+  },
+  "no_overnight": true,
+  "last_entry_ny": "16:00",
+  "flat_by_ny": "16:45",
   "min_rr": 1.5,
   "blocked_symbols": [],
   "allow_short": true,
-  "mt5": {"path": null, "login": null, "server": null},
+  "mt5": {
+    "path": null,
+    "login": null,
+    "server": null
+  },
   "magic": 2126
 }

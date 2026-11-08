@@ -52,6 +52,10 @@ DEFAULT_CONFIG = {
     "max_leverage": 10.0,         # total notional / balance after the new order
     "max_same_currency": 2,       # warn when more trades push the same currency the same way
     "max_spread_pips": 3.0,       # MT5: refuse to send when the spread is wider
+    "max_spread_by_symbol": {},   # {"EURUSD": 1.5, "XAUUSD": 4} overrides per pair
+    "no_overnight": False,        # true = never hold a trade through the 17:00 New York rollover (no swap)
+    "last_entry_ny": "16:00",     # with no_overnight: no new trades after this New York time
+    "flat_by_ny": "16:45",        # with no_overnight: every trade closed by this New York time
     "min_rr": 1.5,                # minimum reward:risk when a target is set
     "blocked_symbols": [],
     "allow_short": True,          # selling a pair is normal in forex
@@ -958,3 +962,59 @@ def exposure(positions):
         ex[b] = ex.get(b, 0) + s
         ex[q] = ex.get(q, 0) - s
     return ex
+
+
+# --------------------------------------------------------------------------
+# no overnight (no swap): everything flat before the 17:00 New York rollover
+# --------------------------------------------------------------------------
+
+def _hm(text):
+    h, m = str(text).split(":")
+    return int(h) * 60 + int(m)
+
+
+def last_rollover(now=None):
+    """The most recent 17:00 New York (start of the current forex day)."""
+    t = (now or ny_now()).astimezone(NY)
+    r = t.replace(hour=17, minute=0, second=0, microsecond=0)
+    return r if t >= r else r - dt.timedelta(days=1)
+
+
+def overnight_status(cfg=None, now=None):
+    """can_open: new trades allowed now; must_close: inside the flat window before rollover."""
+    cfg = cfg or load_config()
+    t = (now or ny_now()).astimezone(NY)
+    on = bool(cfg.get("no_overnight"))
+    tz = user_tz(cfg)
+    hm = t.hour * 60 + t.minute
+    last, flat = _hm(cfg.get("last_entry_ny") or "16:00"), _hm(cfg.get("flat_by_ny") or "16:45")
+    roll = 17 * 60
+    day = t.replace(second=0, microsecond=0)
+    at = lambda m: day.replace(hour=m // 60, minute=m % 60)  # noqa: E731
+    out = {"active": on, "can_open": True, "must_close": False,
+           "rollover_local": at(roll).astimezone(tz).strftime("%H:%M"),
+           "flat_local": at(flat).astimezone(tz).strftime("%H:%M"),
+           "last_entry_local": at(last).astimezone(tz).strftime("%H:%M")}
+    if not on:
+        return out
+    if last <= hm < roll:
+        out["can_open"] = False
+    if flat <= hm < roll:
+        out["must_close"] = True
+    out["minutes_to_flat"] = (flat - hm) if hm < flat else (flat + 24 * 60 - hm if hm >= roll else 0)
+    return out
+
+
+def held_overnight(opened_iso, now=None):
+    """True if a position opened before the last rollover is still open."""
+    try:
+        o = dt.datetime.fromisoformat(str(opened_iso))
+    except (TypeError, ValueError):
+        return False
+    if o.tzinfo is None:
+        o = o.replace(tzinfo=NY)
+    return o < last_rollover(now)
+
+
+def spread_limit(symbol, cfg):
+    return float((cfg.get("max_spread_by_symbol") or {}).get(norm_symbol(symbol), cfg.get("max_spread_pips", 3.0)))

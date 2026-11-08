@@ -144,7 +144,7 @@ def all_true(S, conds, i):
 
 def run(b, rules, capital=10000.0, risk_pct=1.0, sl_atr=2.0, tp_r=None, trail_atr=None, max_bars=None,
         spread=0.0, slippage_bps=0.0, commission_per_lot=0.0, contract=100000.0, conv=None, leverage=10.0,
-        allow_short=True, fractional=False, start_ts=None):
+        allow_short=True, fractional=False, start_ts=None, last_entry_ny=None, flat_ny=None):
     """qty is in units of the base currency (1 lot = `contract` units). conv(price) turns one unit of
     the quote currency into account currency (1 for XXXUSD, 1/price for USDXXX)."""
     S = Series(b)
@@ -154,6 +154,28 @@ def run(b, rules, capital=10000.0, risk_pct=1.0, sl_atr=2.0, tp_r=None, trail_at
     half = spread / 2.0
     conv = conv or (lambda p: 1.0)
     lot_unit = contract * 0.01
+    step_min = T.TF_SECONDS.get(b.tf, 3600) // 60
+    hm = lambda s: int(s.split(":")[0]) * 60 + int(s.split(":")[1]) if s else None  # noqa: E731
+    last_m, flat_m = hm(last_entry_ny), hm(flat_ny)
+
+    def ny_min(i):
+        d = dt.datetime.fromtimestamp(b.t[i], T.NY)
+        return d.hour * 60 + d.minute
+
+    def no_entry(i):
+        if last_m is None:
+            return False
+        m = ny_min(i)
+        return last_m <= m < 17 * 60 or (flat_m is not None and m < 17 * 60 and m + step_min > flat_m)
+
+    def must_flat(i):
+        if flat_m is None or not pos:
+            return False
+        m = ny_min(i)
+        if m < 17 * 60 and m + step_min > flat_m:
+            return True
+        start = dt.datetime.fromtimestamp(b.t[pos["i"]], dt.timezone.utc)
+        return T.last_rollover(dt.datetime.fromtimestamp(b.t[i], dt.timezone.utc)) > start
     cash = capital
     pos = None
     pending = None
@@ -182,6 +204,10 @@ def run(b, rules, capital=10000.0, risk_pct=1.0, sl_atr=2.0, tp_r=None, trail_at
         pos = None
 
     for i in range(first, n):
+        if pending in ("buy", "sell") and pos is None and no_entry(i):
+            pending = None
+        if pos and must_flat(i):
+            close(i, b.o[i], "flat before rollover")
         if pending in ("buy", "sell") and pos is None:
             side = pending
             pending = None
@@ -341,6 +367,10 @@ def backtest(b, rules, name, opts):
                                "commission_per_lot", "allow_short", "fractional", "leverage", "contract") if k in opts}
     T.set_symbol(b.symbol)
     kw["spread"] = opts.get("spread_pips", 0.0) * T.pip_size(b.symbol)
+    if opts.get("no_overnight"):
+        if b.tf in ("D1", "W1"):
+            T.die("--no-overnight needs intraday bars (M1..H4)")
+        kw["last_entry_ny"], kw["flat_ny"] = opts.get("last_entry_ny", "16:00"), opts.get("flat_ny", "16:45")
     kw["conv"] = opts.get("conv") or conv_for(b.symbol)
     trades, curve = run(b, rules, start_ts=start_ts, **kw)
     first = len(b) - len(curve)
@@ -362,7 +392,9 @@ def render(o, show_trades=10):
          "capital %s, risk %s%%/trade, stop %s ATR, target %s, trail %s, slippage %s bps, commission %s/lot/side" % (
              s.get("capital"), s.get("risk_pct"), s.get("sl_atr") or "none", "%sR" % s["tp_r"] if s.get("tp_r") else "none",
              "%s ATR" % s["trail_atr"] if s.get("trail_atr") else "none", s.get("slippage_bps"), s.get("commission_per_lot")),
-         "spread %s pips per round trip%s" % (o.get("spread_pips"), " | P&L converted at " + o["conv_note"] if o.get("conv_note") else ""),
+         "spread %s pips per round trip%s%s" % (o.get("spread_pips"), " | P&L converted at " + o["conv_note"] if o.get("conv_note") else "",
+                                                 " | no overnight: no entries after %s, flat by %s New York" % (
+                                                     s["last_entry_ny"], s["flat_ny"]) if s.get("flat_ny") else ""),
          "",
          "strategy   return %6s%%  CAGR %6s%%  max DD %6s%%  Sharpe %s" % (
              m.get("return_pct"), m.get("cagr_pct"), m.get("max_drawdown_pct"), m.get("sharpe")),
@@ -418,16 +450,24 @@ def main(argv=None):
     ap.add_argument("--commission", type=float, default=0.0, help="account currency per lot per side (ECN accounts)")
     ap.add_argument("--leverage", type=float, default=10.0, help="max notional / equity per trade")
     ap.add_argument("--long-only", action="store_true", help="only buy signals (default: buy and sell)")
+    ap.add_argument("--no-overnight", action="store_true",
+                    help="close everything before the 17:00 New York rollover; no entries after --last-entry")
+    ap.add_argument("--last-entry", default=None, help="New York time, default from config (16:00)")
+    ap.add_argument("--flat-by", default=None, help="New York time, default from config (16:45)")
     ap.add_argument("--fractional", action="store_true")
     ap.add_argument("--split", type=float, default=0.7)
     ap.add_argument("--grid", nargs="*", help="e.g. fast=10,20 slow=50,100: test every combination")
     ap.add_argument("--trades", type=int, default=10, help="how many trades to list")
     a = ap.parse_args(argv)
+    cfg = T.load_config()
     b = T.get_bars(a.symbol, a.tf, a.count, a.source, a.csv)
     opts = {"capital": a.capital, "risk_pct": a.risk_pct, "sl_atr": a.sl_atr or None, "tp_r": a.tp_r,
             "trail_atr": a.trail_atr, "max_bars": a.max_bars, "slippage_bps": a.slippage_bps,
             "commission_per_lot": a.commission, "allow_short": not a.long_only, "fractional": a.fractional,
             "spread_pips": a.spread_pips, "leverage": a.leverage,
+            "no_overnight": a.no_overnight or bool(cfg.get("no_overnight")),
+            "last_entry_ny": a.last_entry or cfg.get("last_entry_ny", "16:00"),
+            "flat_ny": a.flat_by or cfg.get("flat_by_ny", "16:45"),
             "start": a.start, "end": a.end, "split": a.split}
     params = {"fast": a.fast, "slow": a.slow, "rsi_low": a.rsi_low, "rsi_high": a.rsi_high, "lookback": a.lookback}
     if a.grid:

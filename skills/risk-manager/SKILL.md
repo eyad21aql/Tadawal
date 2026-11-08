@@ -57,6 +57,8 @@ A screenshot of the MT5 quotes screen is enough: read the bid prices from it.
 | `min_rr` | 1.5 | minimum reward:risk when a target is set |
 | `blocked_symbols` | [] | |
 | `allow_short` | true | selling a pair is normal in forex |
+| `no_overnight` | false | true = BLOCK new trades after `last_entry_ny` (16:00 New York); everything flat by `flat_by_ny` (16:45), before the swap rollover |
+| `max_spread_by_symbol` | {} | MT5 spread limit per pair, e.g. `{"EURUSD": 1.5, "XAUUSD": 4}` |
 
 Only change limits when the user explicitly asks; show the new values. Never
 loosen a limit to make a blocked order pass: explain the rule and offer a

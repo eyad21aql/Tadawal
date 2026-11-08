@@ -29,12 +29,18 @@ python3 SKILL/backtest.py XAUUSD --tf H1 --strategy macd_trend --tp-r 2 --spread
 python3 SKILL/backtest.py EURUSD --rules trader/my_rules.json --spread-pips 1.2
 python3 SKILL/backtest.py EURUSD --strategy ema_cross --grid fast=10,20,30 slow=50,100,200
 python3 SKILL/backtest.py EURUSD --tf M15 --csv eurusd_m15.csv        # MT5-exported bars
+python3 SKILL/backtest.py XAUUSD --tf M5 --no-overnight --spread-pips 3  # scalping, flat before rollover
 ```
 
 Options: `--capital 10000 --risk-pct 1 --sl-atr 2 (0 = none) --tp-r R
 --trail-atr N --max-bars N --spread-pips 1.0 --commission 0 (per lot per side)
 --leverage 10 --long-only --start --end --split 0.7`. Results are saved under
 `trader/backtests/`.
+
+`--no-overnight` (automatic when the config has `"no_overnight": true`) skips
+entries after `--last-entry` (16:00 New York) and closes every trade before
+`--flat-by` (16:45), exactly like the live rule, so the test matches how the
+user is allowed to trade.
 
 Set `--spread-pips` to the user's real spread (EURUSD ~0.1-1.5, GBPJPY ~2-4,
 gold ~2-4 "pips" of $0.10). Ignoring spread makes scalping systems look far

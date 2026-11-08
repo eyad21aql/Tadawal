@@ -15,6 +15,7 @@ user typed yes for that exact ticket. Three modes (trader/config.json "mode"):
     python3 order.py close 7 --confirm "yes" [--volume 0.1] [--price 1.0890]
     python3 order.py cancel o2                                 # drop a proposed/pending order
     python3 order.py account                                   # which account and mode is active
+    python3 order.py flat [--close --confirm yes]              # no overnight: close all before the rollover
 
 Safety gates, enforced here and not only in the instructions:
   * mode "mt5" refuses REAL accounts unless "allow_live": true in trader/config.json,
@@ -190,8 +191,82 @@ def ledger_sync(cfg):
         elif hit:
             pnl = ledger_close(st, pos, hit[1], hit[0])
             events.append("paper position %s closed at %s %s (%+.2f)" % (pos["id"], hit[0], T.px(hit[1], pos["symbol"]), pnl))
+    ovn = T.overnight_status(cfg)
+    if ovn["active"] and (ovn["must_close"] or any(T.held_overnight(p.get("opened")) for p in st["positions"])):
+        if st.get("pending"):
+            events.append("no overnight: %d pending order(s) cancelled before the rollover" % len(st["pending"]))
+            st["pending"] = []
+        for pos in list(st["positions"]):
+            if manual:
+                events.append("CLOSE NOW in the MT5 app: %s %s %s (no overnight, rollover at %s your time). Then: "
+                              "order.py close %s --price <close price> --confirm yes" % (
+                                  pos["side"], pos["volume"], pos["symbol"], ovn["rollover_local"], pos["id"]))
+            else:
+                p = prices.get(pos["symbol"], pos.get("price") or pos["entry"])
+                pnl = ledger_close(st, pos, p, "closed before rollover (no overnight)")
+                events.append("paper position %s closed before the rollover at %s (%+.2f)" % (pos["id"], T.px(p, pos["symbol"]), pnl))
     T.save_paper(st)
     return events
+
+
+def cmd_flat(a, cfg):
+    """Everything that must be closed before the rollover, and closing it on request."""
+    ovn = T.overnight_status(cfg)
+    acct = T.account_snapshot(cfg)
+    L = ["NO-OVERNIGHT CHECK  rollover %s your time | close everything by %s | last new trade %s" % (
+        ovn["rollover_local"], ovn["flat_local"], ovn["last_entry_local"])]
+    if not ovn["active"]:
+        L.append("(no_overnight is off in trader/config.json)")
+    if ovn.get("minutes_to_flat") is not None and ovn["active"]:
+        L.append("minutes until everything must be flat: %d" % ovn["minutes_to_flat"])
+    pend = acct.get("pending", [])
+    if cfg["mode"] == "mt5":
+        mt5 = T.mt5_connect(cfg, required=True)
+        pend = [{"id": x.ticket, "symbol": x.symbol} for x in (mt5.orders_get() or [])]
+    if not acct["positions"] and not pend:
+        L.append("flat: no open trades, no pending orders")
+        T.emit({"positions": [], "text": "\n".join(L)}, a.json)
+        return 0
+    for p in acct["positions"]:
+        L.append("  #%s %s %s %s  P&L %+.2f%s" % (p["id"], p["side"], p["volume"], p["symbol"], p.get("profit", 0),
+                                                  "  ** already held through a rollover **" if T.held_overnight(p.get("opened")) else ""))
+    for x in pend:
+        L.append("  pending %s %s" % (x.get("id"), x.get("symbol")))
+    if not a.close:
+        L.append("to close them all: order.py flat --close --confirm \"<the user's yes>\"")
+        T.emit({"positions": acct["positions"], "text": "\n".join(L)}, a.json)
+        return 0
+    if not affirmative(a.confirm):
+        T.die("--confirm is not a clear yes")
+    if cfg["mode"] == "manual":
+        L.append("In the MT5 app: Trade (تداول) -> long-press each position -> Close (إغلاق); delete pending orders too. "
+                 "Then record each close with order.py close ID --price X --confirm yes")
+    elif cfg["mode"] == "paper":
+        st = T.paper_state(cfg)
+        st["pending"] = []
+        for pos in list(st["positions"]):
+            price = T.get_price(pos["symbol"], cfg)["price"]
+            pnl = ledger_close(st, pos, price, "closed before rollover (no overnight)")
+            L.append("closed #%s at %s (%+.2f)" % (pos["id"], T.px(price, pos["symbol"]), pnl))
+        T.save_paper(st)
+    else:
+        mt5, _ = mt5_guard(cfg)
+        for x in mt5.orders_get() or []:
+            ok, info = mt5_send(mt5, {"action": mt5.TRADE_ACTION_REMOVE, "order": int(x.ticket)})
+            L.append("pending %s removed: %s" % (x.ticket, "ok" if ok else info))
+        for p in acct["positions"]:
+            bs = p.get("broker_symbol", p["symbol"])
+            si, tk = mt5.symbol_info(bs), mt5.symbol_info_tick(bs)
+            long = p["side"] == "buy"
+            ok, info = mt5_send(mt5, {"action": mt5.TRADE_ACTION_DEAL, "position": int(p["id"]), "symbol": bs,
+                                      "volume": float(p["volume"]), "type": mt5.ORDER_TYPE_SELL if long else mt5.ORDER_TYPE_BUY,
+                                      "price": tk.bid if long else tk.ask, "deviation": 30, "magic": int(cfg.get("magic", 2126)),
+                                      "comment": "tadawal flat", "type_time": mt5.ORDER_TIME_GTC,
+                                      "type_filling": filling(mt5, si)})
+            L.append("closed #%s: %s" % (p["id"], "ok" if ok else info))
+    log_exec({"at": now_iso(), "mode": cfg["mode"], "flat": True, "user_confirmation": a.confirm})
+    T.emit({"text": "\n".join(L)}, a.json)
+    return 0
 
 
 def manual_steps(o, cfg):
@@ -253,6 +328,20 @@ def mt5_send(mt5, req):
                 "price": res.price, "volume": res.volume}
 
 
+def pending_expiry(tick, cfg):
+    """flat_by_ny today, in the broker's server clock (MT5 times are server time as epoch seconds)."""
+    import time as _t
+    if not getattr(tick, "time", 0):
+        return None
+    offset = round((int(tick.time) - _t.time()) / 900.0) * 900   # server clock minus UTC, to 15 minutes
+    now = T.ny_now()
+    h, m = (int(x) for x in str(cfg.get("flat_by_ny") or "16:45").split(":"))
+    flat = now.replace(hour=h, minute=m, second=0, microsecond=0)
+    if flat <= now:
+        return None
+    return int(flat.timestamp()) + int(offset)
+
+
 def mt5_place(o, cfg):
     mt5, ai = mt5_guard(cfg)
     sym = T.broker_symbol(o["symbol"], cfg)
@@ -261,8 +350,9 @@ def mt5_place(o, cfg):
     si = mt5.symbol_info(sym)
     tk = mt5.symbol_info_tick(sym)
     spread = T.pips(tk.ask - tk.bid, o["symbol"])
-    if spread > float(cfg.get("max_spread_pips", 3)):
-        T.die("spread is %s pips, above max_spread_pips %s: wait for normal liquidity" % (spread, cfg.get("max_spread_pips")))
+    if spread > T.spread_limit(o["symbol"], cfg):
+        T.die("spread is %s pips, above your limit %s for %s: wait for normal liquidity" % (
+            spread, T.spread_limit(o["symbol"], cfg), o["symbol"]))
     d = si.digits
     typ = o.get("type", "market")
     buy = o["side"] == "buy"
@@ -280,6 +370,12 @@ def mt5_place(o, cfg):
                 ("buy", "stop"): "ORDER_TYPE_BUY_STOP", ("sell", "stop"): "ORDER_TYPE_SELL_STOP"}[(o["side"], typ)]
         req.update(action=mt5.TRADE_ACTION_PENDING, type=getattr(mt5, kind), price=round(float(o["entry"]), d),
                    type_filling=mt5.ORDER_FILLING_RETURN)
+        if cfg.get("no_overnight"):
+            exp = pending_expiry(tk, cfg)
+            if exp:
+                req.update(type_time=mt5.ORDER_TIME_SPECIFIED, expiration=exp)
+            else:
+                req.update(type_time=mt5.ORDER_TIME_DAY)
     ok, info = mt5_send(mt5, req)
     if not ok:
         return {"status": "rejected", "msg": str(info), "request": req}
@@ -346,6 +442,10 @@ def cmd_place(a, cfg):
         T.die(why)
     if not affirmative(a.confirm):
         T.die("--confirm %r is not a clear yes. Placing nothing." % a.confirm)
+    ovn = T.overnight_status(cfg)
+    if not ovn["can_open"]:
+        T.die("no-overnight rule: no new trades after %s your time (everything is closed by %s, before the rollover "
+              "at %s). This rule cannot be overridden." % (ovn["last_entry_local"], ovn["flat_local"], ovn["rollover_local"]))
     pg = plan_gate(o, cfg, a.override_plan)
     if pg:
         T.die("outside your trading plan: %s. If the user still wants it, they must say why; then add "
@@ -429,6 +529,13 @@ def cmd_positions(a, cfg):
         L.append("  waiting for you to place in the app: %s  %s" % (o["id"], ticket_text(o)))
     if not acct["positions"]:
         L.append("  no open positions")
+    ovn = T.overnight_status(cfg)
+    if ovn["active"] and acct["positions"]:
+        if ovn["must_close"] or any(T.held_overnight(p.get("opened")) for p in acct["positions"]):
+            L.append("!! NO OVERNIGHT: close every trade now (rollover at %s your time): order.py flat" % ovn["rollover_local"])
+        elif ovn.get("minutes_to_flat", 999) <= 60:
+            L.append("! no overnight: %d minutes left to close everything (by %s your time)" % (
+                ovn["minutes_to_flat"], ovn["flat_local"]))
     T.emit({"account": acct, "events": events, "text": "\n".join(L)}, a.json)
     return 0
 
@@ -582,10 +689,14 @@ def main(argv=None):
     x = sub.add_parser("cancel")
     x.add_argument("order_id")
     sub.add_parser("account")
+    fl = sub.add_parser("flat", help="no overnight: what must be closed before the rollover")
+    fl.add_argument("--close", action="store_true")
+    fl.add_argument("--confirm")
     a = ap.parse_args(argv)
     cfg = T.load_config()
     return {"tickets": cmd_tickets, "place": cmd_place, "filled": cmd_filled, "positions": cmd_positions,
-            "modify": cmd_modify, "close": cmd_close, "cancel": cmd_cancel, "account": cmd_account}[a.cmd](a, cfg)
+            "modify": cmd_modify, "close": cmd_close, "cancel": cmd_cancel, "account": cmd_account,
+            "flat": cmd_flat}[a.cmd](a, cfg)
 
 
 if __name__ == "__main__":

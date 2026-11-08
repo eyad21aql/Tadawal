@@ -125,6 +125,10 @@ def detect(trades, plan, cal_events):
     if len(lw) >= MIN_GROUP and len(ll) >= MIN_GROUP and statistics.median(ll) > 1.5 * statistics.median(lw):
         F.append({"kind": "hold_losers", "title": "losers held %.0f min vs winners %.0f min (median): hoping instead of exiting" % (
             statistics.median(ll), statistics.median(lw)), "count": len(ll), "net": None, "ids": [], "severity": 2, "detail": ""})
+    held = [t for t in ts if t.get("_open") and t.get("_close") and T.last_rollover(t["_close"]) > t["_open"]]
+    strict = bool((plan or {}).get("no_overnight"))
+    add("overnight", "trades held through the 17:00 New York rollover (swap charged/paid)%s" % (
+        ": against your no-overnight rule" if strict else ""), held, 3 if strict else 1)
     breaks = [t for t in ts if t.get("rule_break")]
     add("rule_breaks", "trades taken outside your plan (overridden)", breaks, 3)
     newsy = []

@@ -25,6 +25,8 @@ From the user's project folder (`SKILL` = this skill's folder; `python` on Windo
 
 ```bash
 python3 SKILL/plan.py init --style day                # scalp | day | swing | smc
+python3 SKILL/plan.py init --style scalp --pairs EURUSD XAUUSD --sessions london newyork --no-overnight
+python3 SKILL/plan.py set stop_pips_for XAUUSD 20 60   # stop range per pair (gold: 1 pip = $0.10)
 python3 SKILL/plan.py show
 python3 SKILL/plan.py set pairs EURUSD GBPUSD XAUUSD
 python3 SKILL/plan.py set sessions london newyork     # or: any
@@ -47,6 +49,20 @@ can actually watch (their local time), the setups they really trade (make
 each one concrete: what must be true, where the stop goes), limits. Start
 from the closest template, then `set` what differs. Read the final plan back
 and get their OK. Suggest printing it or keeping a screenshot on the phone.
+
+## No overnight (no swap)
+
+`--no-overnight` (or `"no_overnight": true` in `trader/config.json`) means no
+trade is ever held through the 17:00 New York rollover, when swap is charged
+or paid; many Muslim traders require this. It is a hard rule, stronger than
+the plan: risk-manager BLOCKs and order-executor refuses new trades after
+`last_entry_ny` (default 16:00 New York), positions must be closed by
+`flat_by_ny` (16:45), price-alerts rings 30 and 10 minutes before, and the
+coach flags any trade that crossed a rollover. In Riyadh that is: last entry
+00:00, flat by 00:45, rollover 01:00 in winter (23:00 / 23:45 / 00:00 in
+summer, when the US is on summer time). The plan check cannot override it.
+Mention that the user can also ask the broker for an Islamic (swap-free)
+account; the rule stays useful either way.
 
 ## Before every trade
 

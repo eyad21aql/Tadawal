@@ -33,6 +33,11 @@ python3 SKILL/alerts.py price EURUSD USDJPY            # quick quote (spread too
 python3 SKILL/alerts.py clock                          # open/closed, sessions, your time
 ```
 
+With `"no_overnight": true` and open trades, `check`/`watch` also ring by
+themselves 30 and 10 minutes before the flat time and at the flat time
+("CLOSE ALL TRADES NOW"). For a phone-only trader, also suggest a phone alarm
+at the flat time (00:45 Riyadh in winter, 23:45 in summer).
+
 ## Keeping alerts running
 
 An alert only rings while something checks. Tell the user which fits:

@@ -44,6 +44,8 @@ what make the review useful.
 
 ## How to coach
 
+- A trade held through the 17:00 New York rollover is flagged; with a
+  no-overnight plan it is a top-priority fix.
 - Lead with what works (KEEP DOING), then at most 3 fixes, biggest money
   impact first. One concrete rule per fix, e.g. "after a loss, no new trade
   for 60 minutes", "no GBPUSD breakouts until the setup is re-tested in
