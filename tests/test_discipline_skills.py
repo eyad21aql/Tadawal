@@ -15,8 +15,12 @@ coach = load("trade-coach", "coach")
 NY = T.NY
 
 
+def at(day, h, m=0):
+    return dt.datetime(2026, 11, day, h, m, tzinfo=NY)
+
+
 def iso(day, h, m=0):
-    return dt.datetime(2026, 11, day, h, m, tzinfo=NY).isoformat()
+    return at(day, h, m).isoformat()
 
 
 # ---------------------------------------------------------------- trading plan
@@ -39,6 +43,13 @@ class TestPlan(TempTrader):
         v, R, _ = plan.evaluate(o, p, clock, st, 10000, [], [True, True, False, True, True])
         self.assertEqual(v, "OUT OF PLAN")
         self.assertIn("trigger", R[0])
+
+    def test_sunday_wait_only_after_the_open(self):
+        p, o, clock, st = self.base()
+        before = plan.evaluate(o, p, dict(clock, now_iso=at(8, 9).isoformat()), st, 10000, [], [True] * 5)
+        self.assertFalse(any("Sunday open" in r for r in before[1]))
+        after = plan.evaluate(o, p, dict(clock, now_iso=at(8, 17, 20).isoformat()), st, 10000, [], [True] * 5)
+        self.assertTrue(any("Sunday open" in r for r in after[1]))
 
     def test_rules(self):
         p, o, clock, st = self.base()
@@ -72,6 +83,9 @@ class TestPlan(TempTrader):
         self.assertEqual(s["week_pnl"], -130.0)
 
     def test_executor_enforces_plan_and_logs_override(self):
+        saved = T.ny_now
+        T.ny_now = lambda: at(10, 9)                     # a Tuesday morning, whatever day the tests run
+        self.addCleanup(setattr, T, "ny_now", saved)
         self.cfg()
         T.market_clock = lambda now=None, cfg=None: dict(OPEN_CLOCK)
         quiet(plan.main, ["init", "--style", "day"])

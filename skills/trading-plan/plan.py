@@ -190,7 +190,7 @@ def evaluate(order, plan, clock, stats, balance, news, checklist=None, ovn=None)
     if cut and t_ny.weekday() == 4 and t_ny.strftime("%H:%M") >= cut:
         R.append("Friday after %s New York: your plan avoids new trades before the weekend" % cut)
     wait = int(plan.get("sunday_open_wait_minutes") or 0)
-    if wait and t_ny.weekday() == 6 and t_ny.hour * 60 + t_ny.minute < 17 * 60 + wait:
+    if wait and t_ny.weekday() == 6 and 17 * 60 <= t_ny.hour * 60 + t_ny.minute < 17 * 60 + wait:
         R.append("first %d minutes after the Sunday open: spreads are wide, your plan waits" % wait)
     if news:
         R.append("news blackout: " + "; ".join(news))

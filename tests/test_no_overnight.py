@@ -64,6 +64,8 @@ class TestEnforcement(TempTrader):
     def test_executor_refuses_late_even_with_pass(self):
         self.cfg(no_overnight=True)
         T.market_clock = lambda now=None, cfg=None: dict(OPEN_CLOCK)
+        real = self._ovn
+        T.overnight_status = lambda cfg=None, now=None: real(cfg, at(10, 10))   # early: the risk check passes
         quiet(risk.main, ["size", "EURUSD", "--side", "buy", "--stop-pips", "10", "--rr", "2", "--write"])
         quiet(risk.main, ["check"])
         o = T.load_orders()["orders"][0]
