@@ -132,7 +132,7 @@ def ledger_close(st, pos, price, why, volume=None):
         st["positions"] = [p for p in st["positions"] if p["id"] != pos["id"]]
     j = T.journal()
     for t in j["trades"]:
-        if t.get("position") == pos["id"] and t.get("mode") in ("paper", "manual") and t["status"] == "open":
+        if t.get("position") == pos["id"] and t.get("mode") in ("paper", "manual", "robot") and t["status"] == "open":
             risk = abs(t["entry"] - t["sl"]) * vol * pos.get("mpp", 1) if t.get("sl") else None
             rec = dict(exit=price, pnl=pnl, closed_at=now_iso(), status="closed", why=why,
                        pips=T.pips(sgn * (price - t["entry"]), t["symbol"]), r=round(pnl / risk, 2) if risk else None)

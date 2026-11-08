@@ -659,7 +659,7 @@ class TestCOT(unittest.TestCase):
 class TestPackaging(unittest.TestCase):
     EXPECTED = {"entry-timer", "news-monitor", "chart-scanner", "risk-manager", "time-machine", "exit-planner",
                 "price-alerts", "order-executor", "budget-manager", "cot-tracker", "economic-analyst",
-                "trading-plan", "currency-strength", "market-structure", "trade-coach"}
+                "trading-plan", "currency-strength", "market-structure", "trade-coach", "auto-trader"}
 
     def test_all_skills_with_valid_frontmatter(self):
         found = set()

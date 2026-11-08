@@ -144,7 +144,7 @@ def all_true(S, conds, i):
 
 def run(b, rules, capital=10000.0, risk_pct=1.0, sl_atr=2.0, tp_r=None, trail_atr=None, max_bars=None,
         spread=0.0, slippage_bps=0.0, commission_per_lot=0.0, contract=100000.0, conv=None, leverage=10.0,
-        allow_short=True, fractional=False, start_ts=None, last_entry_ny=None, flat_ny=None):
+        allow_short=True, fractional=False, start_ts=None, last_entry_ny=None, flat_ny=None, sessions=None):
     """qty is in units of the base currency (1 lot = `contract` units). conv(price) turns one unit of
     the quote currency into account currency (1 for XXXUSD, 1/price for USDXXX)."""
     S = Series(b)
@@ -163,6 +163,8 @@ def run(b, rules, capital=10000.0, risk_pct=1.0, sl_atr=2.0, tp_r=None, trail_at
         return d.hour * 60 + d.minute
 
     def no_entry(i):
+        if sessions and not set(sessions) & set(T.active_sessions(dt.datetime.fromtimestamp(b.t[i], dt.timezone.utc))):
+            return True
         if last_m is None:
             return False
         m = ny_min(i)
@@ -204,7 +206,7 @@ def run(b, rules, capital=10000.0, risk_pct=1.0, sl_atr=2.0, tp_r=None, trail_at
         pos = None
 
     for i in range(first, n):
-        if pending in ("buy", "sell") and pos is None and no_entry(i):
+        if pending in ("buy", "sell") and pos is None and (no_entry(i) if (last_m is not None or sessions) else False):
             pending = None
         if pos and must_flat(i):
             close(i, b.o[i], "flat before rollover")
@@ -367,6 +369,8 @@ def backtest(b, rules, name, opts):
                                "commission_per_lot", "allow_short", "fractional", "leverage", "contract") if k in opts}
     T.set_symbol(b.symbol)
     kw["spread"] = opts.get("spread_pips", 0.0) * T.pip_size(b.symbol)
+    if opts.get("sessions"):
+        kw["sessions"] = opts["sessions"]
     if opts.get("no_overnight"):
         if b.tf in ("D1", "W1"):
             T.die("--no-overnight needs intraday bars (M1..H4)")
@@ -454,6 +458,7 @@ def main(argv=None):
                     help="close everything before the 17:00 New York rollover; no entries after --last-entry")
     ap.add_argument("--last-entry", default=None, help="New York time, default from config (16:00)")
     ap.add_argument("--flat-by", default=None, help="New York time, default from config (16:45)")
+    ap.add_argument("--sessions", nargs="*", help="only enter during these sessions: london newyork tokyo sydney")
     ap.add_argument("--fractional", action="store_true")
     ap.add_argument("--split", type=float, default=0.7)
     ap.add_argument("--grid", nargs="*", help="e.g. fast=10,20 slow=50,100: test every combination")
@@ -466,6 +471,8 @@ def main(argv=None):
             "commission_per_lot": a.commission, "allow_short": not a.long_only, "fractional": a.fractional,
             "spread_pips": a.spread_pips, "leverage": a.leverage,
             "no_overnight": a.no_overnight or bool(cfg.get("no_overnight")),
+            "sessions": [{"london": "London", "newyork": "New York", "ny": "New York", "tokyo": "Tokyo",
+                          "sydney": "Sydney"}[x.lower()] for x in (a.sessions or [])],
             "last_entry_ny": a.last_entry or cfg.get("last_entry_ny", "16:00"),
             "flat_ny": a.flat_by or cfg.get("flat_by_ny", "16:45"),
             "start": a.start, "end": a.end, "split": a.split}
