@@ -43,3 +43,21 @@ def path(points, steps=10, **kw):
             out.append(a + (b - a) * s / steps)
     out.append(points[-1])
     return from_closes(out, spread=0.002, **kw)
+
+
+def fx_universe(trends, n=200, seed=1, tf="H1", noise=0.0006):
+    """Bars for every pair of the given currencies from per-currency drifts.
+    trends = {"EUR": +0.0004, "USD": 0, "JPY": -0.0004, ...} (log drift per bar)."""
+    import itertools
+    rnd = random.Random(seed)
+    val = {c: [1.0] for c in trends}
+    for _ in range(n - 1):
+        for c, d in trends.items():
+            val[c].append(val[c][-1] * math.exp(d + noise * rnd.gauss(0, 1)))
+    out = {}
+    for a, b in itertools.combinations(sorted(trends), 2):
+        p = T.market_pair(a, b)
+        base, quote = T.split_pair(p)
+        closes = [val[base][k] / val[quote][k] for k in range(n)]
+        out[p] = from_closes(closes, symbol=p, tf=tf, spread=0.0005, seed=seed)
+    return out

@@ -34,7 +34,9 @@ python3 SKILL/risk.py check                                         # PASS / BLO
 python3 SKILL/risk.py status                                        # positions, open risk, exposure, today
 ```
 
-`--write` adds an order (`o1`, `o2`, ...) as `proposed`. With `--entry` it is
+`--write` adds an order (`o1`, `o2`, ...) as `proposed`. Add `--setup <name>`
+with the trading-plan setup the trade follows (needed for `trading-plan check`
+and for the coach to learn which setups work). With `--entry` it is
 a limit order unless `--type market|stop` says otherwise.
 
 Pip values for pairs not quoted in the account currency need a live price

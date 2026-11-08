@@ -1,6 +1,6 @@
 # Tadawal — حزمة مهارات فوركس لـ Claude
 
-11 مهارة لـ Claude لتداول **أزواج العملات والذهب** (EURUSD وGBPJPY وUSDJPY وXAUUSD…)
+15 مهارة لـ Claude لتداول **أزواج العملات والذهب** (EURUSD وGBPJPY وUSDJPY وXAUUSD…)
 مع **ميتاتريدر 5**، سواء من الجوال أو من الكمبيوتر.
 ما يتنفذ أي أمر إلا بعد فحص المخاطر وموافقتك الصريحة.
 
@@ -17,6 +17,10 @@
 | 9 | Budget Manager — مدير الميزانية | `budget-manager` | خطة الحساب، وجدول اللوتات، وسجل الصفقات، وتقرير الأداء |
 | 10 | COT Tracker — متتبع الحيتان | `cot-tracker` | مراكز كبار المضاربين في كل عملة وفي الذهب، من تقرير COT الرسمي الأسبوعي |
 | 11 | Economic Analyst — المحلل الاقتصادي | `economic-analyst` | الأجندة الاقتصادية بتوقيتك، والنتائج مقارنة بالتوقعات، والاتجاه الأساسي للزوج |
+| 12 | Trading Plan — خطة التداول | `trading-plan` | تكتب قواعدك مرة وحدة (الأزواج والجلسات والنماذج والحدود وقائمة الفحص)، وكل صفقة تنفحص عليها قبل التنفيذ |
+| 13 | Currency Strength — قوة العملات | `currency-strength` | ترتيب العملات الثمان من الأقوى للأضعف من 28 زوج، وأفضل زوج (قوية ضد ضعيفة)، وجدول الارتباط بين الأزواج |
+| 14 | Market Structure — هيكل السوق (SMC) | `market-structure` | BOS وCHoCH والأوردر بلوك والفجوات السعرية (FVG) والسيولة وسحبها ومناطق الخصم والعلاوة، وصفقة SMC جاهزة |
+| 15 | Trade Coach — مدرب التداول | `trade-coach` | يراجع صفقاتك ويقول لك وش تكمل عليه ووش تصلحه: انتقام من السوق، تكبير اللوت بعد الخسارة، كثرة الصفقات، تقفيل الربح بدري |
 
 ## ثلاث طرق للتنفيذ (`mode` في الإعدادات)
 
@@ -53,7 +57,7 @@ cp -r Tadawal/skills/* ~/.claude/skills/
 python tools/build_zips.py      # -> dist/<skill>.zip
 ```
 بعدها: Settings ← Capabilities ← فعّل Code execution ← Skills ← Upload،
-وارفع ملفات الـ ZIP الـ 11 واحد واحد.
+وارفع ملفات الـ ZIP الـ 15 واحد واحد.
 
 ## الإعداد لأول مرة
 
@@ -75,17 +79,23 @@ python tools/build_zips.py      # -> dist/<skill>.zip
 ## طريقة العمل
 
 ```
-economic-analyst calendar  (أخبار اليوم)   +   cot-tracker / news-monitor  (الصورة العامة)
-chart-scanner / entry-timer  ->  exit-planner  ->  risk-manager size --write
-        ->  risk-manager check (PASS)  ->  order-executor tickets  ->  موافقتك  ->  place
-price-alerts / exit-planner review / budget-manager report   (المتابعة)
-time-machine   (اختبار أي استراتيجية قبل المال الحقيقي)
+trading-plan init          (مرة وحدة: قواعدك)
+trading-plan today + economic-analyst calendar        (قبل الجلسة: أقدر أتداول؟ وش الأخبار؟)
+cot-tracker / economic-analyst bias / currency-strength   (أي زوج وأي اتجاه)
+market-structure / chart-scanner / entry-timer  ->  exit-planner
+   ->  risk-manager size --setup NAME --write  ->  risk-manager check  ->  trading-plan check
+   ->  order-executor tickets  ->  موافقتك  ->  place
+price-alerts / exit-planner review           (المتابعة)
+trade-coach review --days 7 / budget-manager report   (المراجعة الأسبوعية)
+time-machine                                 (اختبار أي استراتيجية قبل المال الحقيقي)
 ```
 
 ## الحماية
 
 - ما ينفَّذ أي أمر بدون ستوب، ولا بدون موافقة من مدير المخاطر عمرها أقل من ساعة،
   ولا بدون كلمة "نعم" صريحة منك. وأي تعديل على الأمر يلغي الموافقة.
+- إذا عندك خطة تداول مفعّلة، الصفقة لازم تكون ضمن الخطة. ولو حبيت تتجاوزها لازم تكتب السبب،
+  وتنسجل عليك كمخالفة يراجعها معك المدرب.
 - حد للخسارة اليومية (اليوم في الفوركس يبدأ الساعة 17:00 بتوقيت نيويورك)، وحد للرافعة،
   وحد لعدد الصفقات المفتوحة، وتنبيه إذا عندك أكثر من صفقة على نفس العملة بنفس الاتجاه.
 - في وضع `mt5`: يرفض الإرسال إذا كان السبريد أكبر من الحد اللي حددته.

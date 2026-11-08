@@ -32,7 +32,12 @@ This skill can move real money. Follow every step, every time.
    does not cover a new or changed ticket. Never write the confirmation
    yourself.
 4. One ticket per yes. Several approved: place them one by one, report each.
-5. Never set `"allow_live": true` or change `"mode"` yourself. If the user
+5. If the user has a trading plan with `enforce` on, the order also needs
+   IN PLAN from `trading-plan check`. If it is out of plan and the user still
+   wants it, ask for their reason and pass it with
+   `--override-plan "<their words>"`; it is recorded as a rule break. Never
+   override on your own.
+6. Never set `"allow_live": true` or change `"mode"` yourself. If the user
    asks, explain the risk and show them the exact line to change in
    `trader/config.json`; they make the change.
 

@@ -658,9 +658,10 @@ class TestCOT(unittest.TestCase):
 
 class TestPackaging(unittest.TestCase):
     EXPECTED = {"entry-timer", "news-monitor", "chart-scanner", "risk-manager", "time-machine", "exit-planner",
-                "price-alerts", "order-executor", "budget-manager", "cot-tracker", "economic-analyst"}
+                "price-alerts", "order-executor", "budget-manager", "cot-tracker", "economic-analyst",
+                "trading-plan", "currency-strength", "market-structure", "trade-coach"}
 
-    def test_eleven_skills_with_valid_frontmatter(self):
+    def test_all_skills_with_valid_frontmatter(self):
         found = set()
         for d in os.listdir(SK):
             p = os.path.join(SK, d, "SKILL.md")

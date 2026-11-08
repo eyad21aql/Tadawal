@@ -279,6 +279,7 @@ def main(argv=None):
     s.add_argument("--type", choices=["market", "limit", "stop"], default=None)
     s.add_argument("--write", action="store_true", help="append the order to trader/orders.json")
     s.add_argument("--note", default="")
+    s.add_argument("--setup", help="the trading-plan setup this trade follows")
     s.add_argument("--json", action="store_true")
     pv = sub.add_parser("pipvalue", help="value of one pip per lot")
     pv.add_argument("symbols", nargs="+")
@@ -314,11 +315,13 @@ def main(argv=None):
             otype = a.type or ("market" if a.entry is None else "limit")
             order = {"id": next_order_id(data), "symbol": sym, "side": out["side"], "type": otype,
                      "volume": out["volume"], "entry": round(entry, d), "sl": stop, "tp": target,
-                     "status": "proposed", "note": a.note, "created": T.ny_now().isoformat(timespec="seconds")}
+                     "status": "proposed", "note": a.note, "setup": a.setup,
+                     "created": T.ny_now().isoformat(timespec="seconds")}
             data["orders"].append(order)
             T.save_orders(data)
             out["order"] = order
-            out["text"] += "\nwritten to trader/orders.json as %s (%s). Next: risk.py check" % (order["id"], otype)
+            out["text"] += "\nwritten to trader/orders.json as %s (%s). Next: risk.py check%s" % (
+                order["id"], otype, " and plan.py check %s" % order["id"] if os.path.exists(T.tpath("plan.json")) else "")
         T.emit(out, a.json)
         return 0
     if a.cmd == "pipvalue":

@@ -1,7 +1,7 @@
 {
   "name": "tadawal",
-  "description": "11 forex trading skills for MetaTrader 5 (phone or desktop): entry timing, chart patterns, economic calendar, COT positioning, news, lot sizing and risk, exits, backtests, alerts, budget and order execution with your explicit yes.",
-  "version": "1.0.0",
+  "description": "15 forex trading skills for MetaTrader 5 (phone or desktop): trading plan and discipline, currency strength, SMC market structure, entry timing, chart patterns, economic calendar, COT, news, lot sizing and risk, exits, backtests, alerts, budget, trade coaching and order execution with your explicit yes.",
+  "version": "1.1.0",
   "author": {
     "name": "eyad21aql"
   },

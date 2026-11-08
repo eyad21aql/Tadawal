@@ -69,6 +69,29 @@ def verdict_for(order):
     return v, None
 
 
+def plan_gate(o, cfg, override):
+    """None if the trading plan allows the order (or there is no enforced plan), else the reason."""
+    plan = T.load_json(T.tpath("plan.json"), None)
+    if not plan or not plan.get("enforce", True):
+        return None
+    v = (T.load_json(T.tpath("plan_verdicts.json"), {}) or {}).get(T.order_hash(o))
+    why = None
+    if not v:
+        why = "not checked against your trading plan (run: plan.py check %s)" % o.get("id")
+    elif v.get("verdict") != "IN PLAN":
+        why = "%s: %s" % (v["verdict"], "; ".join(v.get("reasons", [])))
+    else:
+        try:
+            age = (T.ny_now() - dt.datetime.fromisoformat(v["checked_at"])).total_seconds() / 60
+        except Exception:
+            age = 1e9
+        if age > PASS_MAX_AGE_MIN:
+            why = "the plan check is %.0f minutes old; run plan.py check again" % age
+    if why and override:
+        return None
+    return why
+
+
 def ticket_text(o):
     s = T.norm_symbol(o["symbol"])
     typ = o.get("type", "market")
@@ -86,13 +109,14 @@ def ledger_open(o, cfg, price, mode, note=""):
     st["next_id"] += 1
     pos = {"id": pid, "symbol": T.norm_symbol(o["symbol"]), "side": o["side"], "volume": o["volume"], "entry": price,
            "sl": o.get("sl"), "tp": o.get("tp"), "price": price, "mpp": T.money_per_point(spec), "opened": now_iso(),
-           "order_id": o.get("id"), "mode": mode}
+           "order_id": o.get("id"), "mode": mode, "setup": o.get("setup"), "rule_break": o.get("rule_break")}
     st["positions"].append(pos)
     T.save_paper(st)
     j = T.journal()
     j["trades"].append({"id": "%s%d" % (mode[0], pid), "position": pid, "order_id": o.get("id"), "mode": mode,
                         "symbol": pos["symbol"], "side": o["side"], "volume": o["volume"], "entry": price,
-                        "sl": o.get("sl"), "tp": o.get("tp"), "opened_at": pos["opened"], "status": "open", "note": note})
+                        "sl": o.get("sl"), "tp": o.get("tp"), "opened_at": pos["opened"], "status": "open", "note": note,
+                        "setup": o.get("setup"), "rule_break": o.get("rule_break")})
     T.save_journal(j)
     return pos
 
@@ -265,7 +289,8 @@ def mt5_place(o, cfg):
         j["trades"].append({"id": "m%s" % info["deal"], "position": info["order"], "order_id": o.get("id"), "mode": "mt5",
                             "account": ai.login, "symbol": T.norm_symbol(o["symbol"]), "side": o["side"],
                             "volume": info["volume"], "entry": info["price"], "sl": o.get("sl"), "tp": o.get("tp"),
-                            "opened_at": now_iso(), "status": "open"})
+                            "opened_at": now_iso(), "status": "open", "setup": o.get("setup"),
+                            "rule_break": o.get("rule_break")})
         T.save_journal(j)
     return {"status": st, "msg": "MT5 %s: retcode %s %s (spread %s pips)" % (st, info["retcode"], info["comment"], spread),
             "result": info, "request": req,
@@ -293,6 +318,9 @@ def cmd_tickets(a, cfg):
         if v:
             L.append("READY  %s  ticket %s  %s" % (o["id"], h, ticket_text(o)))
             L += ["       ! " + w for w in v.get("warnings", [])]
+            pg = plan_gate(o, cfg, None)
+            if pg:
+                L.append("       PLAN: " + pg)
         else:
             L.append("NOT READY  %s  %s  -> %s" % (o["id"], ticket_text(o), why))
         out.append({"id": o["id"], "ticket": h if v else None, "ready": bool(v), "why": why, "order": o})
@@ -318,6 +346,12 @@ def cmd_place(a, cfg):
         T.die(why)
     if not affirmative(a.confirm):
         T.die("--confirm %r is not a clear yes. Placing nothing." % a.confirm)
+    pg = plan_gate(o, cfg, a.override_plan)
+    if pg:
+        T.die("outside your trading plan: %s. If the user still wants it, they must say why; then add "
+              "--override-plan \"<their reason>\" (it is recorded as a rule break)." % pg)
+    if a.override_plan:
+        o["rule_break"] = a.override_plan
     clock = T.market_clock(cfg=cfg)
     mode = cfg["mode"]
     typ = o.get("type", "market")
@@ -348,7 +382,8 @@ def cmd_place(a, cfg):
     if ok:
         o["status"], o["placed_at"] = new_status, now_iso()
         T.save_orders(data)
-    log_exec({"at": now_iso(), "mode": mode, "order": o, "ticket": h, "user_confirmation": a.confirm, "result": res})
+    log_exec({"at": now_iso(), "mode": mode, "order": o, "ticket": h, "user_confirmation": a.confirm,
+              "plan_override": a.override_plan, "result": res})
     head = {"sent_manual": "APPROVED - PLACE IT YOURSELF", "filled": "PLACED", "pending": "PLACED"}.get(res["status"], "NOT PLACED")
     T.emit(dict(res, text="%s  %s  ticket %s\n%s" % (head, ticket_text(o), h, res["msg"])), a.json)
     return 0 if ok else 1
@@ -526,6 +561,7 @@ def main(argv=None):
     p.add_argument("order_id")
     p.add_argument("--ticket", required=True)
     p.add_argument("--confirm", required=True, help="the user's own words, e.g. 'yes' / 'نعم'")
+    p.add_argument("--override-plan", help="the user's reason for trading outside their plan (logged)")
     f = sub.add_parser("filled", help="manual mode: record the fill from the app")
     f.add_argument("order_id")
     f.add_argument("--price", type=float, required=True)
